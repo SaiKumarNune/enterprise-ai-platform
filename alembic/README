@@ -1,0 +1,4 @@
+Alembic migration environment for the Enterprise AI Platform.
+
+Run Alembic from the project root. See the root README for commands.
+No application tables have been created yet.
