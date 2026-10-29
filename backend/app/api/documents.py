@@ -7,9 +7,14 @@ from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.database import get_db
+from app.models.chunk import DocumentChunk
 from app.models.document import Document
+from app.schemas.chunk import DocumentChunkResponse
 from app.schemas.document import DocumentCreate, DocumentResponse, DocumentUpdate
+from app.services.extraction import EmptyDocumentError, ExtractionError
+from app.services.ingestion import IngestionConflictError, process_stored_document
 from app.services.storage import (
     FileTooLargeError,
     InvalidFileContentError,
@@ -138,6 +143,75 @@ def update_document(
     db.commit()
     db.refresh(document)
     return document
+
+
+@router.post("/documents/{document_id}/process", response_model=DocumentResponse)
+def process_document(
+    document_id: UUID,
+    db: Session = Depends(get_db),
+    storage: LocalStorage = Depends(get_storage),
+) -> Document:
+    document = db.get(Document, document_id)
+    if document is None:
+        raise _not_found()
+    try:
+        return process_stored_document(
+            db,
+            document,
+            storage,
+            chunk_size=settings.chunk_size,
+            overlap=settings.chunk_overlap,
+        )
+    except IngestionConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except StoredFileMissingError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Stored file not found",
+        ) from exc
+    except EmptyDocumentError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Document contains no extractable text",
+        ) from exc
+    except ExtractionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Unable to extract text from document",
+        ) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Document processing failed",
+        ) from exc
+
+
+@router.get(
+    "/documents/{document_id}/chunks",
+    response_model=list[DocumentChunkResponse],
+)
+def list_document_chunks(
+    document_id: UUID,
+    db: Session = Depends(get_db),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+) -> list[DocumentChunk]:
+    document = db.get(Document, document_id)
+    if document is None:
+        raise _not_found()
+    statement = (
+        select(DocumentChunk)
+        .where(DocumentChunk.document_id == document_id)
+        .order_by(DocumentChunk.chunk_index.asc())
+        .offset(skip)
+        .limit(limit)
+    )
+    return list(db.scalars(statement).all())
 
 
 @router.get("/documents/{document_id}/download")

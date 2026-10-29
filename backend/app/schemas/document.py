@@ -25,9 +25,10 @@ class DocumentCreate(BaseModel):
 
 
 class DocumentUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     filename: str | None = Field(default=None, min_length=1, max_length=255)
     content_type: str | None = Field(default=None, min_length=1, max_length=100)
-    status: DocumentStatus | None = None
 
     @field_validator("filename", "content_type")
     @classmethod

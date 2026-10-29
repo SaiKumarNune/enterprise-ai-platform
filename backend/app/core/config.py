@@ -22,6 +22,8 @@ class Settings:
     postgres_port: int
     upload_dir: Path
     max_upload_bytes: int
+    chunk_size: int
+    chunk_overlap: int
 
     @property
     def database_url(self) -> str:
@@ -51,6 +53,8 @@ def _load_settings() -> Settings:
         postgres_port=int(os.getenv("POSTGRES_PORT", "5432")),
         upload_dir=_resolve_upload_dir(os.getenv("UPLOAD_DIR", "uploads")),
         max_upload_bytes=int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024))),
+        chunk_size=int(os.getenv("CHUNK_SIZE", "1000")),
+        chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "200")),
     )
 
 

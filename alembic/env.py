@@ -12,7 +12,7 @@ if backend_path not in sys.path:
 
 from app.core.config import settings
 from app.core.database import Base
-from app.models import Document  # noqa: F401
+from app.models import Document, DocumentChunk  # noqa: F401
 
 config = context.config
 

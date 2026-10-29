@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from app.core.database import get_db
 from app.main import app
+from app.models.chunk import DocumentChunk
 from app.models.document import Document
 
 client = TestClient(app)
@@ -28,16 +29,27 @@ class FakeSession:
         fail_commit: bool = False,
     ) -> None:
         self.documents = list(documents or [])
-        self.added: list[Document] = []
-        self.deleted: list[Document] = []
+        self.chunks: list[DocumentChunk] = []
+        self.added: list[object] = []
+        self.deleted: list[object] = []
         self.commit_called = False
         self.rollback_called = False
         self.fail_commit = fail_commit
         self.refreshed: list[Document] = []
         self.last_statement = None
 
-    def add(self, document: Document) -> None:
+    def add(self, obj: object) -> None:
         now = datetime.now(timezone.utc)
+        if isinstance(obj, DocumentChunk):
+            if obj.id is None:
+                obj.id = uuid.uuid4()
+            if obj.created_at is None:
+                obj.created_at = now
+            self.added.append(obj)
+            self.chunks.append(obj)
+            return
+        document = obj
+        assert isinstance(document, Document)
         if document.id is None:
             document.id = uuid.uuid4()
         if document.status is None:
@@ -57,28 +69,66 @@ class FakeSession:
     def rollback(self) -> None:
         self.rollback_called = True
 
-    def refresh(self, document: Document) -> None:
-        self.refreshed.append(document)
+    def refresh(self, obj: object) -> None:
+        self.refreshed.append(obj)
 
-    def get(self, model, ident):
-        for document in self.documents:
-            if document.id == ident:
-                return document
+    def flush(self) -> None:
         return None
 
-    def delete(self, document: Document) -> None:
-        self.deleted.append(document)
+    def get(self, model, ident):
+        rows = self.chunks if model is DocumentChunk else self.documents
+        for item in rows:
+            if item.id == ident:
+                return item
+        return None
+
+    def delete(self, obj: object) -> None:
+        self.deleted.append(obj)
+        if isinstance(obj, DocumentChunk):
+            self.chunks = [item for item in self.chunks if item.id != obj.id]
+            return
+        document = obj
+        assert isinstance(document, Document)
         self.documents = [item for item in self.documents if item.id != document.id]
+        self.chunks = [item for item in self.chunks if item.document_id != document.id]
+
+    def execute(self, statement):
+        compiled = statement.compile()
+        sql = str(compiled).lower()
+        params = compiled.params
+        if sql.strip().startswith("delete"):
+            document_id = next(
+                (value for value in params.values() if isinstance(value, uuid.UUID)),
+                None,
+            )
+            if document_id is None:
+                self.chunks = []
+            else:
+                self.chunks = [
+                    item for item in self.chunks if item.document_id != document_id
+                ]
+        return statement
 
     def scalars(self, statement):
         self.last_statement = statement
+        entity = statement.column_descriptions[0]["entity"]
         offset = _clause_int(getattr(statement, "_offset_clause", None)) or 0
         limit = _clause_int(getattr(statement, "_limit_clause", None))
-        rows = list(self.documents)
+        if entity is DocumentChunk:
+            rows = sorted(self.chunks, key=lambda item: item.chunk_index)
+            params = statement.compile().params
+            document_id = next(
+                (value for value in params.values() if isinstance(value, uuid.UUID)),
+                None,
+            )
+            if document_id is not None:
+                rows = [item for item in rows if item.document_id == document_id]
+        else:
+            rows = list(self.documents)
         selected = rows[offset:] if limit is None else rows[offset : offset + limit]
 
         class Result:
-            def all(inner_self) -> list[Document]:
+            def all(inner_self) -> list:
                 return selected
 
         return Result()
@@ -317,7 +367,7 @@ def test_patch_document_updates_metadata() -> None:
     try:
         response = client.patch(
             f"/documents/{document.id}",
-            json={"filename": "renamed.txt", "status": "ready"},
+            json={"filename": "renamed.txt"},
         )
     finally:
         _clear_overrides()
@@ -325,7 +375,7 @@ def test_patch_document_updates_metadata() -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["filename"] == "renamed.txt"
-    assert body["status"] == "ready"
+    assert body["status"] == "uploaded"
     assert body["content_type"] == "application/pdf"
     assert session.commit_called
 
