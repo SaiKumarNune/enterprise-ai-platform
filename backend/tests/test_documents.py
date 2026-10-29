@@ -10,14 +10,29 @@ from app.models.document import Document
 client = TestClient(app)
 
 
+def _clause_int(clause) -> int | None:
+    if clause is None:
+        return None
+    value = getattr(clause, "value", None)
+    if value is None:
+        return None
+    return int(value)
+
+
 class FakeSession:
     """In-memory stand-in so API tests never touch PostgreSQL."""
 
-    def __init__(self, documents: list[Document] | None = None) -> None:
+    def __init__(
+        self,
+        documents: list[Document] | None = None,
+        fail_commit: bool = False,
+    ) -> None:
         self.documents = list(documents or [])
         self.added: list[Document] = []
         self.deleted: list[Document] = []
         self.commit_called = False
+        self.rollback_called = False
+        self.fail_commit = fail_commit
         self.refreshed: list[Document] = []
         self.last_statement = None
 
@@ -35,7 +50,12 @@ class FakeSession:
         self.documents.append(document)
 
     def commit(self) -> None:
+        if self.fail_commit:
+            raise RuntimeError("commit failed")
         self.commit_called = True
+
+    def rollback(self) -> None:
+        self.rollback_called = True
 
     def refresh(self, document: Document) -> None:
         self.refreshed.append(document)
@@ -52,10 +72,14 @@ class FakeSession:
 
     def scalars(self, statement):
         self.last_statement = statement
+        offset = _clause_int(getattr(statement, "_offset_clause", None)) or 0
+        limit = _clause_int(getattr(statement, "_limit_clause", None))
+        rows = list(self.documents)
+        selected = rows[offset:] if limit is None else rows[offset : offset + limit]
 
         class Result:
             def all(inner_self) -> list[Document]:
-                return list(self.documents)
+                return selected
 
         return Result()
 
@@ -251,6 +275,92 @@ def test_delete_document_returns_422_for_invalid_uuid() -> None:
         _clear_overrides()
 
     assert response.status_code == 422
+    assert not session.commit_called
+
+
+def test_list_documents_paginates_with_skip_and_limit() -> None:
+    first = _sample_document("first.pdf")
+    second = _sample_document("second.pdf")
+    third = _sample_document("third.pdf")
+    session = FakeSession(documents=[first, second, third])
+    _override_db(session)
+    try:
+        response = client.get("/documents", params={"skip": 1, "limit": 1})
+    finally:
+        _clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["filename"] for item in body] == ["second.pdf"]
+    compiled = str(session.last_statement.compile())
+    assert "LIMIT" in compiled
+    assert "OFFSET" in compiled
+
+
+def test_list_documents_rejects_invalid_pagination() -> None:
+    session = FakeSession()
+    _override_db(session)
+    try:
+        too_large = client.get("/documents", params={"limit": 101})
+        negative = client.get("/documents", params={"skip": -1})
+    finally:
+        _clear_overrides()
+
+    assert too_large.status_code == 422
+    assert negative.status_code == 422
+
+
+def test_patch_document_updates_metadata() -> None:
+    document = _sample_document()
+    session = FakeSession(documents=[document])
+    _override_db(session)
+    try:
+        response = client.patch(
+            f"/documents/{document.id}",
+            json={"filename": "renamed.txt", "status": "ready"},
+        )
+    finally:
+        _clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["filename"] == "renamed.txt"
+    assert body["status"] == "ready"
+    assert body["content_type"] == "application/pdf"
+    assert session.commit_called
+
+
+def test_patch_document_returns_404_when_missing() -> None:
+    session = FakeSession()
+    _override_db(session)
+    try:
+        response = client.patch(
+            f"/documents/{uuid.uuid4()}",
+            json={"filename": "renamed.txt"},
+        )
+    finally:
+        _clear_overrides()
+
+    assert response.status_code == 404
+
+
+def test_patch_document_returns_422_for_invalid_input() -> None:
+    document = _sample_document()
+    session = FakeSession(documents=[document])
+    _override_db(session)
+    try:
+        invalid_uuid = client.patch("/documents/not-a-uuid", json={"filename": "x"})
+        blank = client.patch(f"/documents/{document.id}", json={"filename": "  "})
+        bad_status = client.patch(
+            f"/documents/{document.id}",
+            json={"status": "not-a-status"},
+        )
+    finally:
+        _clear_overrides()
+
+    assert invalid_uuid.status_code == 422
+    assert blank.status_code == 422
+    assert bad_status.status_code == 422
     assert not session.commit_called
 
 

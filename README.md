@@ -8,11 +8,12 @@ Backend foundation for an Enterprise AI Knowledge & Workflow Automation Platform
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
+cp .env.example .env
 ```
 
 ## Run the API
 
-From the repository root:
+From the repository root, with PostgreSQL running:
 
 ```bash
 source .venv/bin/activate
@@ -23,53 +24,57 @@ Open http://127.0.0.1:8000/health or http://127.0.0.1:8000/docs.
 
 ## PostgreSQL (local Docker)
 
-Copy the example environment file, then start the database:
-
 ```bash
-cp .env.example .env
 docker compose up -d db
-```
-
-Stop it with:
-
-```bash
-docker compose stop db
-```
-
-Remove the container but keep data:
-
-```bash
-docker compose down
-```
-
-Check that Postgres is accepting connections:
-
-```bash
 docker compose ps
 docker compose exec db pg_isready -U enterprise_user -d enterprise_ai
+docker compose stop db
+docker compose down        # keep volume
+docker compose down -v     # wipe database data
 ```
 
-A healthy `db` service reports `status: healthy`. Data lives in the named volume `postgres_data`, so it survives `docker compose down`. Delete that volume only when you want a clean database:
-
-```bash
-docker compose down -v
-```
-
-Postgres is bound to `127.0.0.1:5432` (this machine only). With the API running, check connectivity at http://127.0.0.1:8000/db-health.
+Postgres is bound to `127.0.0.1:5432`. Check connectivity at http://127.0.0.1:8000/db-health.
 
 ## Database migrations (Alembic)
 
-Run Alembic from the project root with the virtualenv active and PostgreSQL running. Credentials come from `.env` via application settings; they are not stored in `alembic.ini`.
+Run from the project root with the virtualenv active and PostgreSQL running:
 
 ```bash
 alembic current
 alembic upgrade head
 alembic downgrade -1
 alembic revision --autogenerate -m "describe the change"
-alembic upgrade head --sql
 ```
 
-There are no application tables or revision files yet. `alembic current` should connect and report that no revision is applied. Use `--sql` for offline SQL generation without applying changes.
+## Document API
+
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/documents` | Metadata-only create |
+| `GET` | `/documents` | List; `skip` default 0, `limit` default 20, max 100. Ordered by `created_at DESC`, `id DESC` |
+| `GET` | `/documents/{document_id}` | Fetch one document |
+| `PATCH` | `/documents/{document_id}` | Partial update of `filename`, `content_type`, `status` |
+| `DELETE` | `/documents/{document_id}` | Delete metadata and best-effort file cleanup |
+| `POST` | `/documents/upload` | Multipart file upload (`file` field) |
+| `GET` | `/documents/{document_id}/download` | Download stored file |
+
+Allowed upload types: PDF and UTF-8 plain text. Maximum size: 10 MB (`MAX_UPLOAD_BYTES`). Type is detected from file content, not the client filename or MIME type.
+
+Files are stored under `UPLOAD_DIR` (default `uploads/` at the project root, gitignored) using a server-generated UUID filename. The original filename is saved only as metadata.
+
+### Upload and download examples
+
+```bash
+curl -X POST http://127.0.0.1:8000/documents/upload \
+  -F "file=@./handbook.pdf"
+
+curl -X POST http://127.0.0.1:8000/documents/upload \
+  -F "file=@./notes.txt"
+
+curl -O -J http://127.0.0.1:8000/documents/<document-id>/download
+```
+
+`status` may be `uploaded`, `processing`, `ready`, or `failed`.
 
 ## Run tests
 
@@ -77,3 +82,5 @@ There are no application tables or revision files yet. `alembic current` should 
 source .venv/bin/activate
 pytest
 ```
+
+Tests use an in-memory fake session and temporary directories. They do not write to the development PostgreSQL database.

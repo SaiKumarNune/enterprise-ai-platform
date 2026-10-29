@@ -30,6 +30,9 @@ node_modules/
 dist/
 build/
 
+# Local document uploads
+uploads/
+
 # Editors and OS
 .DS_Store
 .idea/

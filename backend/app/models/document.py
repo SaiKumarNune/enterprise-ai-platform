@@ -35,3 +35,4 @@ class Document(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+    storage_path: Mapped[str | None] = mapped_column(String(512), nullable=True)

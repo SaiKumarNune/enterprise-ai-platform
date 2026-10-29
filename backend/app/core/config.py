@@ -20,6 +20,8 @@ class Settings:
     postgres_password: str = field(repr=False)
     postgres_host: str
     postgres_port: int
+    upload_dir: Path
+    max_upload_bytes: int
 
     @property
     def database_url(self) -> str:
@@ -31,6 +33,13 @@ class Settings:
         )
 
 
+def _resolve_upload_dir(raw: str) -> Path:
+    path = Path(raw)
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path
+
+
 def _load_settings() -> Settings:
     return Settings(
         app_title=os.getenv("APP_TITLE", "Enterprise AI Platform"),
@@ -40,6 +49,8 @@ def _load_settings() -> Settings:
         postgres_password=os.getenv("POSTGRES_PASSWORD", ""),
         postgres_host=os.getenv("POSTGRES_HOST", "127.0.0.1"),
         postgres_port=int(os.getenv("POSTGRES_PORT", "5432")),
+        upload_dir=_resolve_upload_dir(os.getenv("UPLOAD_DIR", "uploads")),
+        max_upload_bytes=int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024))),
     )
 
 
