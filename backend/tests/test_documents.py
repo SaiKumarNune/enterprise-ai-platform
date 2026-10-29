@@ -16,6 +16,7 @@ class FakeSession:
     def __init__(self, documents: list[Document] | None = None) -> None:
         self.documents = list(documents or [])
         self.added: list[Document] = []
+        self.deleted: list[Document] = []
         self.commit_called = False
         self.refreshed: list[Document] = []
         self.last_statement = None
@@ -38,6 +39,16 @@ class FakeSession:
 
     def refresh(self, document: Document) -> None:
         self.refreshed.append(document)
+
+    def get(self, model, ident):
+        for document in self.documents:
+            if document.id == ident:
+                return document
+        return None
+
+    def delete(self, document: Document) -> None:
+        self.deleted.append(document)
+        self.documents = [item for item in self.documents if item.id != document.id]
 
     def scalars(self, statement):
         self.last_statement = statement
@@ -147,6 +158,100 @@ def test_list_documents_returns_records_in_query_order() -> None:
     assert "created_at" in compiled
     assert "id" in compiled
     assert compiled.count("DESC") >= 2
+
+
+def _sample_document(filename: str = "handbook.pdf") -> Document:
+    now = datetime.now(timezone.utc)
+    return Document(
+        id=uuid.uuid4(),
+        filename=filename,
+        content_type="application/pdf",
+        status="uploaded",
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def test_get_document_returns_200() -> None:
+    document = _sample_document()
+    session = FakeSession(documents=[document])
+    _override_db(session)
+    try:
+        response = client.get(f"/documents/{document.id}")
+    finally:
+        _clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == str(document.id)
+    assert body["filename"] == "handbook.pdf"
+    assert body["content_type"] == "application/pdf"
+    assert body["status"] == "uploaded"
+
+
+def test_get_document_returns_404_when_missing() -> None:
+    session = FakeSession()
+    _override_db(session)
+    try:
+        response = client.get(f"/documents/{uuid.uuid4()}")
+    finally:
+        _clear_overrides()
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Document not found"}
+
+
+def test_get_document_returns_422_for_invalid_uuid() -> None:
+    session = FakeSession()
+    _override_db(session)
+    try:
+        response = client.get("/documents/not-a-uuid")
+    finally:
+        _clear_overrides()
+
+    assert response.status_code == 422
+
+
+def test_delete_document_returns_204() -> None:
+    document = _sample_document()
+    session = FakeSession(documents=[document])
+    _override_db(session)
+    try:
+        response = client.delete(f"/documents/{document.id}")
+    finally:
+        _clear_overrides()
+
+    assert response.status_code == 204
+    assert response.content == b""
+    assert session.commit_called
+    assert session.deleted == [document]
+    assert session.documents == []
+
+
+def test_delete_document_returns_404_when_missing() -> None:
+    session = FakeSession()
+    _override_db(session)
+    try:
+        response = client.delete(f"/documents/{uuid.uuid4()}")
+    finally:
+        _clear_overrides()
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Document not found"}
+    assert not session.commit_called
+    assert session.deleted == []
+
+
+def test_delete_document_returns_422_for_invalid_uuid() -> None:
+    session = FakeSession()
+    _override_db(session)
+    try:
+        response = client.delete("/documents/not-a-uuid")
+    finally:
+        _clear_overrides()
+
+    assert response.status_code == 422
+    assert not session.commit_called
 
 
 def test_list_documents_returns_empty_list() -> None:
