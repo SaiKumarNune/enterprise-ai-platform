@@ -1,0 +1,37 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Node / frontend leftovers (future)
+node_modules/
+
+# Packaging / build
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
