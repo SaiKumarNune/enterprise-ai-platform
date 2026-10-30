@@ -1,3 +1,4 @@
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -7,6 +8,7 @@ from app.core.database import get_db
 from app.main import app
 from app.models.chunk import DocumentChunk
 from app.models.document import Document
+from app.models.workflow import AgentWorkflow
 from app.services.search import cosine_similarity
 
 client = TestClient(app)
@@ -31,16 +33,32 @@ class FakeSession:
     ) -> None:
         self.documents = list(documents or [])
         self.chunks: list[DocumentChunk] = []
+        self.workflows: list[AgentWorkflow] = []
         self.added: list[object] = []
         self.deleted: list[object] = []
         self.commit_called = False
         self.rollback_called = False
         self.fail_commit = fail_commit
-        self.refreshed: list[Document] = []
+        self.refreshed: list[object] = []
         self.last_statement = None
+        self._row_lock = threading.Lock()
+        self._lock_held = False
 
     def add(self, obj: object) -> None:
         now = datetime.now(timezone.utc)
+        if isinstance(obj, AgentWorkflow):
+            if obj.id is None:
+                obj.id = uuid.uuid4()
+            if obj.created_at is None:
+                obj.created_at = now
+            if obj.updated_at is None:
+                obj.updated_at = now
+            if obj.retrieval_count is None:
+                obj.retrieval_count = 0
+            self.added.append(obj)
+            if obj not in self.workflows:
+                self.workflows.append(obj)
+            return
         if isinstance(obj, DocumentChunk):
             if obj.id is None:
                 obj.id = uuid.uuid4()
@@ -64,11 +82,19 @@ class FakeSession:
 
     def commit(self) -> None:
         if self.fail_commit:
+            self._release_lock()
             raise RuntimeError("commit failed")
         self.commit_called = True
+        self._release_lock()
 
     def rollback(self) -> None:
         self.rollback_called = True
+        self._release_lock()
+
+    def _release_lock(self) -> None:
+        if self._lock_held:
+            self._lock_held = False
+            self._row_lock.release()
 
     def refresh(self, obj: object) -> None:
         self.refreshed.append(obj)
@@ -76,8 +102,16 @@ class FakeSession:
     def flush(self) -> None:
         return None
 
-    def get(self, model, ident):
-        rows = self.chunks if model is DocumentChunk else self.documents
+    def get(self, model, ident, **kwargs):
+        if kwargs.get("with_for_update") and not self._lock_held:
+            self._row_lock.acquire()
+            self._lock_held = True
+        if model is DocumentChunk:
+            rows = self.chunks
+        elif model is AgentWorkflow:
+            rows = self.workflows
+        else:
+            rows = self.documents
         for item in rows:
             if item.id == ident:
                 return item

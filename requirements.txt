@@ -10,3 +10,4 @@ python-multipart==0.0.32
 pypdf==6.21.4
 pgvector==0.4.1
 sentence-transformers==5.1.2
+langgraph==1.2.18

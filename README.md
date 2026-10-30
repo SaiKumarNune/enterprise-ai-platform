@@ -120,9 +120,55 @@ curl -X POST http://127.0.0.1:8000/rag/ask \
   -d '{"question": "How many vacation days do employees receive?", "top_k": 5}'
 ```
 
-Response fields: `answer`, `sources` (`source_id`, `document_id`, `chunk_id`, `chunk_index`, `page_number`, `similarity`), `retrieval_count`, `grounded`, `citation_valid`, `abstained`, `model`. `similarity` is cosine similarity. The answer cites sources as `[S1]`, `[S2]`. Unknown citation IDs are stripped. Factual answers without citations stay in the response with `grounded=false` and `citation_valid=false`; they are not rewritten into the insufficient-information fallback.
+Response fields: `answer`, `sources` (`source_id`, `document_id`, `chunk_id`, `chunk_index`, `page_number`, `similarity`), `retrieval_count`, `grounded`, `citation_valid`, `abstained`, `model`. `similarity` is cosine similarity. The answer cites sources as `[S1]`, `[S2]`, or grouped `[S1, S4]`. Unknown IDs are stripped, remaining citations always match `sources`, and `citation_valid` is false if any invalid ID was generated or a factual answer lacks citations. Stripping an invalid ID does not make the response citation-valid. Factual answers without citations stay in the response with `grounded=false` and `citation_valid=false`; they are not rewritten into the insufficient-information fallback.
 
 This is not a guarantee of factual correctness. Prompting and citation checks reduce some failure modes; they do not eliminate hallucinations or prove that a cited claim is true. Latency is limited by local embedding + Ollama generation on the request thread (`503` if Ollama is down, `504` on timeout).
+
+## Agent workflows (development only)
+
+`POST /agents/run` starts a **synchronous** LangGraph `StateGraph`: classify/plan → retrieve (existing RAG search) → prepare answer or draft → approval gate or finalize.
+
+These endpoints are **unauthenticated and DEVELOPMENT-ONLY**. Do not expose them as an organizational approval system.
+
+LangGraph orchestrates in-process nodes and does **not** use an in-memory checkpointer as source of truth. The durable record is the `agent_workflows` PostgreSQL row (status, draft, sources, decision, simulated result, `graph_state` snapshot). Process restart is recovered from that row, not from a MemorySaver.
+
+```text
+START
+  ├─ classify_or_plan
+  │     → retrieve_context  (knowledge_search, read-only)
+  │         → prepare_answer_or_draft
+  │               ├─ informational / clarification / abstain → finalize → END
+  │               └─ draft leave_request → approval_gate → END (pending_approval)
+  └─ after API decision
+        ├─ approve → execute_approved_action (simulated DB record only) → finalize
+        └─ reject  → reject_gate → finalize
+```
+
+Allowlisted tools: `knowledge_search`, `prepare_approval_request`, `execute_approved_action`. Planner JSON is untrusted; unknown tools and malformed output fall back to deterministic routing. The model cannot authorize execution. Only `POST /agents/{id}/approve` sets `authorized=True` after a row lock on `pending_approval`.
+
+Simulated execution writes `execution_result.simulated=true` on the workflow row. It does **not** send email, call external APIs, or change documents.
+
+```bash
+alembic upgrade head   # revision e7a1b0c2d3f4
+```
+
+```bash
+curl -X POST http://127.0.0.1:8000/agents/run \
+  -H "Content-Type: application/json" \
+  -d '{"request": "Review the vacation policy and prepare an approval request for three days off.", "top_k": 5}'
+
+curl http://127.0.0.1:8000/agents/$WORKFLOW_ID
+
+curl -X POST http://127.0.0.1:8000/agents/$WORKFLOW_ID/approve \
+  -H "Content-Type: application/json" -d '{}'
+
+curl -X POST http://127.0.0.1:8000/agents/$WORKFLOW_ID/reject \
+  -H "Content-Type: application/json" -d '{}'
+```
+
+Example pending response (abridged): `status=pending_approval`, `draft.action_type=leave_request`, `draft.days=3`, `draft.reason=Not provided` when the user omitted a reason, `sources=[{source_id, document_id, chunk_id, ...}]`, `execution_result=null`. After approve: `status=completed`, `execution_result.simulated=true`. Drafts do not invent dates, reasons, or names; missing optional fields use `Not provided`, and missing required days asks for clarification.
+
+`AGENT_MAX_STEPS` (default `8`) caps graph recursion. `/search` and `/rag/ask` contracts are unchanged.
 
 ## Run tests
 

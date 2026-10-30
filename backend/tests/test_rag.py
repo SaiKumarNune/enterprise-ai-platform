@@ -37,6 +37,7 @@ def _chunk(document_id, index: int, content: str, page_number: int | None = 1) -
 
 def test_parse_citation_ids_is_stable_and_deduped() -> None:
     assert parse_citation_ids("A [S2] then [S1] then [S2].") == ["S2", "S1"]
+    assert parse_citation_ids("Policy [S1, S4]. Carryover [S4, S5].") == ["S1", "S4", "S5"]
 
 
 def test_sanitize_answer_keeps_valid_citations() -> None:
@@ -50,6 +51,27 @@ def test_sanitize_answer_strips_unknown_citations() -> None:
     assert grounded is False
     assert "[S9]" not in cleaned
     assert "[S1]" in cleaned
+
+
+def test_inspect_answer_grouped_citations_with_only_s1_valid() -> None:
+    text = (
+        "Full-time employees receive 15 vacation days [S1, S4]. "
+        "Unused days do not carry over [S4, S5]."
+    )
+    check = inspect_answer(text, {"S1"})
+    assert "[S1]" in check.cleaned_answer
+    assert "[S4]" not in check.cleaned_answer
+    assert "[S5]" not in check.cleaned_answer
+    assert check.citation_ids == ["S1"]
+    assert check.citation_valid is False
+    assert check.grounded is False
+
+
+def test_inspect_answer_keeps_grouped_valid_ids() -> None:
+    check = inspect_answer("Leave is 15 days [S1, S4].", {"S1", "S4"})
+    assert check.cleaned_answer.endswith("[S1, S4].") or "[S1, S4]" in check.cleaned_answer
+    assert check.citation_ids == ["S1", "S4"]
+    assert check.citation_valid is True
 
 
 def test_inspect_answer_flags_missing_citations_without_rewriting() -> None:
@@ -157,6 +179,36 @@ def test_rag_ask_returns_insufficient_when_no_chunks() -> None:
     assert body["abstained"] is True
     assert body["sources"] == []
     assert llm.calls == []
+
+
+def test_rag_ask_grouped_citations_do_not_drop_or_fabricate_sources() -> None:
+    document = _sample_document("policy.txt")
+    chunk = _chunk(document.id, 0, "Employees receive 15 vacation days each year.")
+    session = FakeSession(documents=[document])
+    session.chunks = [chunk]
+    llm = ScriptedLLM(
+        "Employees receive 15 vacation days [S1, S4]. "
+        "Unused days do not carry over [S4, S5]."
+    )
+    app.dependency_overrides[get_llm] = lambda: llm
+    _override_db(session)
+    try:
+        response = client.post(
+            "/rag/ask",
+            json={"question": "How many vacation days do employees receive?"},
+        )
+    finally:
+        _clear_overrides()
+
+    body = response.json()
+    assert response.status_code == 200
+    assert "[S1]" in body["answer"]
+    assert "[S4]" not in body["answer"]
+    assert "[S5]" not in body["answer"]
+    assert [item["source_id"] for item in body["sources"]] == ["S1"]
+    assert body["sources"][0]["chunk_id"] == str(chunk.id)
+    assert body["citation_valid"] is False
+    assert body["grounded"] is False
 
 
 def test_rag_ask_handles_malformed_llm_citations() -> None:

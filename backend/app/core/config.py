@@ -32,6 +32,7 @@ class Settings:
     rag_context_chars: int
     rag_min_similarity: float
     rag_retrieve_multiplier: int
+    agent_max_steps: int
 
     @property
     def database_url(self) -> str:
@@ -71,6 +72,7 @@ def _load_settings() -> Settings:
         rag_context_chars=int(os.getenv("RAG_CONTEXT_CHARS", "6000")),
         rag_min_similarity=float(os.getenv("RAG_MIN_SIMILARITY", "0.2")),
         rag_retrieve_multiplier=int(os.getenv("RAG_RETRIEVE_MULTIPLIER", "2")),
+        agent_max_steps=int(os.getenv("AGENT_MAX_STEPS", "8")),
     )
 
 
