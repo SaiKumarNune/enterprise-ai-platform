@@ -8,7 +8,9 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models.document import Document
 from app.models.workflow import AgentWorkflow
-from app.services.agent_graph import compile_agent_graph
+from app.services.agent_graph import CLARIFICATION_ANSWER, compile_agent_graph
+from app.services.agents.trace import append_trace
+from app.services.agents.validator import validate_workflow
 from app.services.embeddings import EmbeddingBackend
 from app.services.llm import LLMBackend
 
@@ -59,6 +61,7 @@ def run_agent_workflow(
         "sources": [],
         "excerpts": [],
         "retrieval_count": 0,
+        "agent_trace": [],
     }
     try:
         state = graph.invoke(initial, config={"recursion_limit": settings.agent_max_steps})
@@ -88,6 +91,33 @@ def approve_agent_workflow(
 ) -> AgentWorkflow:
     workflow = _claim_pending(db, workflow_id, decision="approved")
     state = _state_from_workflow(workflow)
+    check = validate_workflow(state)
+    if not check["validation"]["passed"]:
+        now = datetime.now(timezone.utc)
+        issues = list(check["validation"]["issues"])
+        messages = [
+            item["message"] for item in issues if item.get("severity") == "error"
+        ]
+        workflow.status = "needs_clarification"
+        workflow.approval_decision = None
+        workflow.execution_result = None
+        workflow.abstained = True
+        workflow.answer = CLARIFICATION_ANSWER + ((" " + " ".join(messages)) if messages else "")
+        state.update(check)
+        state["status"] = "needs_clarification"
+        state["authorized"] = False
+        state["agent_trace"] = append_trace(
+            state,
+            agent="validator",
+            outcome="failed",
+            summary="Re-validation blocked approval of a stale or invalid pending draft.",
+            issues=issues,
+        )
+        _apply_state(workflow, state)
+        workflow.updated_at = now
+        db.commit()
+        db.refresh(workflow)
+        return workflow
     state["resume_mode"] = "approve"
     state["authorized"] = True
     graph = compile_agent_graph(db, embedder, llm)
@@ -186,6 +216,7 @@ def _apply_state(workflow: AgentWorkflow, state: dict) -> None:
     workflow.abstained = state.get("abstained")
     workflow.approval_decision = state.get("approval_decision")
     workflow.execution_result = state.get("execution_result")
+    workflow.agent_trace = list(state.get("agent_trace") or [])
     persistable = {
         key: value
         for key, value in state.items()

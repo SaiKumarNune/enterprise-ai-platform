@@ -32,6 +32,7 @@ class AgentWorkflow(Base):
     approval_decision: Mapped[str | None] = mapped_column(String(20), nullable=True)
     execution_result: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     graph_state: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    agent_trace: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

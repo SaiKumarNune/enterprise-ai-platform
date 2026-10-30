@@ -126,30 +126,35 @@ This is not a guarantee of factual correctness. Prompting and citation checks re
 
 ## Agent workflows (development only)
 
-`POST /agents/run` starts a **synchronous** LangGraph `StateGraph`: classify/plan → retrieve (existing RAG search) → prepare answer or draft → approval gate or finalize.
+`POST /agents/run` starts a **synchronous** LangGraph graph with four distinct agents. These endpoints are **unauthenticated and DEVELOPMENT-ONLY**. Do not expose them as an organizational approval system.
 
-These endpoints are **unauthenticated and DEVELOPMENT-ONLY**. Do not expose them as an organizational approval system.
-
-LangGraph orchestrates in-process nodes and does **not** use an in-memory checkpointer as source of truth. The durable record is the `agent_workflows` PostgreSQL row (status, draft, sources, decision, simulated result, `graph_state` snapshot). Process restart is recovered from that row, not from a MemorySaver.
+| Agent | Responsibility |
+|---|---|
+| Planner | Structured task plan (`informational`, `clarification`, or allowlisted `leave_request`). Rejects unknown tools/actions. Never authorizes execution. |
+| Research | Existing `knowledge_search` / RAG retrieval with optional `document_id`. Returns source IDs, chunk IDs, and similarity. Synthesizes cited informational answers. Does not invent sources. |
+| Validator | Citation IDs vs retrieved evidence, missing required days, policy vs user personal fields, and simple allotment checks. `semantic_verification` is always false. |
+| Action | Simulated `leave_request` drafts from user-provided details only. Execution runs only after `POST /agents/{id}/approve`. |
 
 ```text
 START
-  ├─ classify_or_plan
-  │     → retrieve_context  (knowledge_search, read-only)
-  │         → prepare_answer_or_draft
-  │               ├─ informational / clarification / abstain → finalize → END
-  │               └─ draft leave_request → approval_gate → END (pending_approval)
+  ├─ planner_agent → research_agent
+  │     ├─ informational / clarification → validator_agent → finalize
+  │     └─ leave_request → action_agent (draft) → validator_agent
+  │           ├─ validation pass → approval_gate → END (pending_approval)
+  │           └─ validation fail → finalize (needs_clarification / abstain)
   └─ after API decision
-        ├─ approve → execute_approved_action (simulated DB record only) → finalize
+        ├─ approve → action_agent (simulated execute) → finalize
         └─ reject  → reject_gate → finalize
 ```
 
-Allowlisted tools: `knowledge_search`, `prepare_approval_request`, `execute_approved_action`. Planner JSON is untrusted; unknown tools and malformed output fall back to deterministic routing. The model cannot authorize execution. Only `POST /agents/{id}/approve` sets `authorized=True` after a row lock on `pending_approval`.
+LangGraph is in-process orchestration only. PostgreSQL `agent_workflows` (including `agent_trace` and `graph_state`) is the durable source of truth. An in-memory checkpointer is not used for authorization. `AGENT_MAX_STEPS` (default 8) bounds the graph.
 
-Simulated execution writes `execution_result.simulated=true` on the workflow row. It does **not** send email, call external APIs, or change documents.
+`agent_trace` is a list of `{agent, outcome, summary, issues[]}`. It does not include prompts, chain-of-thought, or document excerpt text.
+
+Allowlisted tools: `knowledge_search`, `prepare_approval_request`, `execute_approved_action`. Only `POST /agents/{id}/approve` sets `authorized=True` after a row lock on `pending_approval`. Simulated execution writes `execution_result.simulated=true` and does not send email or change documents.
 
 ```bash
-alembic upgrade head   # revision e7a1b0c2d3f4
+alembic upgrade head   # head f8a2b3c4d5e6 (agent_trace); prior e7a1b0c2d3f4
 ```
 
 ```bash
@@ -166,9 +171,17 @@ curl -X POST http://127.0.0.1:8000/agents/$WORKFLOW_ID/reject \
   -H "Content-Type: application/json" -d '{}'
 ```
 
-Example pending response (abridged): `status=pending_approval`, `draft.action_type=leave_request`, `draft.days=3`, `draft.reason=Not provided` when the user omitted a reason, `sources=[{source_id, document_id, chunk_id, ...}]`, `execution_result=null`. After approve: `status=completed`, `execution_result.simulated=true`. Drafts do not invent dates, reasons, or names; missing optional fields use `Not provided`, and missing required days asks for clarification.
+Example pending response (abridged): `status=pending_approval` only after the validator parses annual allowance, required reason/date rules, and citation IDs from retrieved evidence. Drafts do not invent dates, reasons, or names. If policy requires a reason or planned dates and the user omitted them, or if requested days exceed the parsed annual allowance, the workflow is `needs_clarification` with issue codes such as `days_exceed_policy`, `missing_reason`, `missing_dates`, or `policy_rule_unverified`. Annual entitlement is not treated as remaining balance (`employee_balance_unknown` warning).
+
+**Already pending workflows:** Approve now re-runs these checks. A stale `pending_approval` row created before this patch (for example a 25-day draft against a 10-day policy) is moved to `needs_clarification` and is **not** executed. Reject those rows, or GET them after a failed approve, then submit a new `/agents/run` with complete user details.
 
 `AGENT_MAX_STEPS` (default `8`) caps graph recursion. `/search` and `/rag/ask` contracts are unchanged.
+
+### Local verification (Swagger)
+
+1. Informational threshold: `POST /agents/run` with `When do vacation requests require manager approval?` and the vacation policy `document_id`. Expect `completed` and wording `3 or more consecutive days`, not `exceeding 3 days`.
+2. Incomplete leave: `POST /agents/run` with `Review the vacation policy and prepare an approval request for three days off.` Expect `needs_clarification` plus `missing_reason` and `missing_dates` when the policy requires those fields.
+3. Over-limit leave: `POST /agents/run` with `Review the vacation policy and prepare an approval request for 25 days off.` Expect `needs_clarification` and `days_exceed_policy`. A complete 3-day request with reason and dates within the parsed annual cap can reach `pending_approval`.
 
 ## Run tests
 

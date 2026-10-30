@@ -25,7 +25,7 @@ LEAVE_HINTS = (
     "vacation request",
 )
 DAYS_RE = re.compile(
-    r"\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\d{1,2})\s+days?\b",
+    r"\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\d{1,2})\s+(?:vacation\s+|calendar\s+)?days?\b",
     re.IGNORECASE,
 )
 WORD_DAYS = {
@@ -43,6 +43,11 @@ WORD_DAYS = {
     "twelve": 12,
 }
 JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
+ISO_DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
+BECAUSE_RE = re.compile(
+    r"\bbecause\s+(.+?)(?=\s+from\s+\d{4}-\d{2}-\d{2}|\s+starting\b|\s+on\s+\d{4}-\d{2}-\d{2}|$)",
+    re.IGNORECASE | re.DOTALL,
+)
 NOT_PROVIDED = "Not provided"
 
 SIMULATED_EXECUTION_MESSAGE = (
@@ -137,9 +142,10 @@ def prepare_approval_request(
     days = _parse_days(request)
     if days is None or days < 1 or days > 30:
         return None
-    reason = _user_supplied_value(request, payload.get("reason"))
-    start_date = _user_supplied_value(request, payload.get("start_date"))
-    end_date = _user_supplied_value(request, payload.get("end_date"))
+    provided = extract_user_leave_details(request)
+    reason = _user_supplied_value(request, payload.get("reason")) or provided["reason"]
+    start_date = _user_supplied_value(request, payload.get("start_date")) or provided["start_date"]
+    end_date = _user_supplied_value(request, payload.get("end_date")) or provided["end_date"]
     employee_name = _user_supplied_value(request, payload.get("employee_name"))
     raw_details = " ".join(
         str(payload.get(key) or "")
@@ -228,7 +234,34 @@ def _fallback_plan(request: str, *, reason: str) -> dict[str, Any]:
     }
 
 
+def extract_user_leave_details(request: str) -> dict[str, Any]:
+    because = BECAUSE_RE.search(request)
+    reason = None
+    if because:
+        reason = " ".join(because.group(1).split()).strip(" .,")
+        if not reason or (DAYS_RE.search(reason) and len(reason.split()) <= 5):
+            reason = None
+    dates = ISO_DATE_RE.findall(request)
+    return {
+        "days": parse_leave_days(request),
+        "reason": reason,
+        "start_date": dates[0] if dates else None,
+        "end_date": dates[1] if len(dates) > 1 else None,
+    }
+
+
+def parse_leave_days(request: str) -> int | None:
+    match = DAYS_RE.search(request)
+    if match is None:
+        return None
+    token = match.group(1).lower()
+    if token.isdigit():
+        return int(token)
+    return WORD_DAYS.get(token)
+
+
 def _parse_days(request: str) -> int | None:
+    return parse_leave_days(request)
     match = DAYS_RE.search(request)
     if match is None:
         return None
@@ -267,7 +300,10 @@ def _build_leave_details(
     ]
     if source_ids:
         citation = "[" + ", ".join(source_ids) + "]"
-        parts.append(f"Policy basis for available leave is cited {citation}.")
+        parts.append(
+            f"Policy excerpts cited {citation}. Annual entitlement is a policy limit, "
+            "not a verified remaining balance."
+        )
     return " ".join(parts)
 
 

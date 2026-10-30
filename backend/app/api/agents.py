@@ -6,7 +6,12 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import get_db
 from app.models.workflow import AgentWorkflow
-from app.schemas.agent import AgentDecisionRequest, AgentRunRequest, AgentWorkflowResponse
+from app.schemas.agent import (
+    AgentDecisionRequest,
+    AgentRunRequest,
+    AgentTraceStep,
+    AgentWorkflowResponse,
+)
 from app.schemas.rag import RagSourceResponse
 from app.services.agent_workflow import (
     AgentConflictError,
@@ -180,4 +185,5 @@ def _to_response(workflow: AgentWorkflow) -> AgentWorkflowResponse:
         updated_at=workflow.updated_at,
         decided_at=workflow.decided_at,
         executed_at=workflow.executed_at,
+        agent_trace=[AgentTraceStep.model_validate(item) for item in workflow.agent_trace or []],
     )

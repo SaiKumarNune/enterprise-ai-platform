@@ -22,6 +22,19 @@ class AgentRunRequest(BaseModel):
         return value
 
 
+class AgentTraceIssue(BaseModel):
+    code: str
+    message: str
+    severity: str
+
+
+class AgentTraceStep(BaseModel):
+    agent: str
+    outcome: str
+    summary: str
+    issues: list[AgentTraceIssue] = []
+
+
 class AgentDecisionRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -48,3 +61,4 @@ class AgentWorkflowResponse(BaseModel):
     updated_at: datetime
     decided_at: datetime | None
     executed_at: datetime | None
+    agent_trace: list[AgentTraceStep] = []
