@@ -18,6 +18,7 @@ from app.services.rag import (
 )
 from tests.fake_embeddings import HashEmbedder
 from tests.fake_llm import ScriptedLLM, TimeoutLLM, UnavailableLLM
+from tests.auth_helpers import auth_headers
 from tests.test_documents import FakeSession, _clear_overrides, _override_db, _sample_document
 
 client = TestClient(app)
@@ -111,11 +112,11 @@ def test_rag_ask_returns_grounded_answer_with_sources() -> None:
     llm = ScriptedLLM("Employees receive 15 vacation days each year [S1].")
     app.dependency_overrides[get_llm] = lambda: llm
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
         response = client.post(
             "/rag/ask",
-            json={"question": "How many vacation days do employees receive?", "top_k": 5},
-        )
+            json={"question": "How many vacation days do employees receive?", "top_k": 5}, headers=headers)
     finally:
         _clear_overrides()
 
@@ -146,14 +147,14 @@ def test_rag_ask_filters_by_document_id() -> None:
     llm = ScriptedLLM("The orchard uses drip irrigation [S1].")
     app.dependency_overrides[get_llm] = lambda: llm
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
         response = client.post(
             "/rag/ask",
             json={
                 "question": "How is the orchard irrigated?",
                 "document_id": str(first.id),
-            },
-        )
+            }, headers=headers)
     finally:
         _clear_overrides()
 
@@ -167,8 +168,9 @@ def test_rag_ask_returns_insufficient_when_no_chunks() -> None:
     llm = ScriptedLLM("should not be called")
     app.dependency_overrides[get_llm] = lambda: llm
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.post("/rag/ask", json={"question": "What is the refund policy?"})
+        response = client.post("/rag/ask", json={"question": "What is the refund policy?"}, headers=headers)
     finally:
         _clear_overrides()
 
@@ -192,11 +194,11 @@ def test_rag_ask_grouped_citations_do_not_drop_or_fabricate_sources() -> None:
     )
     app.dependency_overrides[get_llm] = lambda: llm
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
         response = client.post(
             "/rag/ask",
-            json={"question": "How many vacation days do employees receive?"},
-        )
+            json={"question": "How many vacation days do employees receive?"}, headers=headers)
     finally:
         _clear_overrides()
 
@@ -219,8 +221,9 @@ def test_rag_ask_handles_malformed_llm_citations() -> None:
     llm = ScriptedLLM("The office opens at midnight [S99].")
     app.dependency_overrides[get_llm] = lambda: llm
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.post("/rag/ask", json={"question": "When does the office open?"})
+        response = client.post("/rag/ask", json={"question": "When does the office open?"}, headers=headers)
     finally:
         _clear_overrides()
 
@@ -243,8 +246,9 @@ def test_rag_ask_ignores_prompt_injection_in_documents() -> None:
     llm = ScriptedLLM("Badges are required [S1].")
     app.dependency_overrides[get_llm] = lambda: llm
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.post("/rag/ask", json={"question": "Are badges required?"})
+        response = client.post("/rag/ask", json={"question": "Are badges required?"}, headers=headers)
     finally:
         _clear_overrides()
 
@@ -263,11 +267,11 @@ def test_rag_ask_reports_unavailable_ollama() -> None:
     session.chunks = [chunk]
     app.dependency_overrides[get_llm] = lambda: UnavailableLLM()
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
         response = client.post(
             "/rag/ask",
-            json={"question": "How many vacation days do employees receive?"},
-        )
+            json={"question": "How many vacation days do employees receive?"}, headers=headers)
     finally:
         _clear_overrides()
 
@@ -282,11 +286,11 @@ def test_rag_ask_reports_llm_timeout() -> None:
     session.chunks = [chunk]
     app.dependency_overrides[get_llm] = lambda: TimeoutLLM()
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
         response = client.post(
             "/rag/ask",
-            json={"question": "How many vacation days do employees receive?"},
-        )
+            json={"question": "How many vacation days do employees receive?"}, headers=headers)
     finally:
         _clear_overrides()
 
@@ -296,12 +300,14 @@ def test_rag_ask_reports_llm_timeout() -> None:
 def test_rag_ask_validates_input_and_missing_document() -> None:
     session = FakeSession()
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        blank = client.post("/rag/ask", json={"question": "   "})
-        too_large = client.post("/rag/ask", json={"question": "hello", "top_k": 21})
+        blank = client.post("/rag/ask", json={"question": "   "}, headers=headers)
+        too_large = client.post("/rag/ask", json={"question": "hello", "top_k": 21}, headers=headers)
         missing = client.post(
             "/rag/ask",
             json={"question": "hello", "document_id": str(uuid.uuid4())},
+            headers=headers,
         )
     finally:
         _clear_overrides()
@@ -360,11 +366,11 @@ def test_rag_ask_keeps_synthesized_answer_when_citations_are_missing() -> None:
     llm = ScriptedLLM("Employees receive 15 vacation days each year.")
     app.dependency_overrides[get_llm] = lambda: llm
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
         response = client.post(
             "/rag/ask",
-            json={"question": "How many vacation days do employees receive?"},
-        )
+            json={"question": "How many vacation days do employees receive?"}, headers=headers)
     finally:
         _clear_overrides()
 

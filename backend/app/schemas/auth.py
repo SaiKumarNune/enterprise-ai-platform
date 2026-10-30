@@ -49,6 +49,7 @@ class TokenResponse(BaseModel):
 class UserResponse(BaseModel):
     id: UUID
     email: str
+    tenant_id: UUID | None = None
     role: str
     is_active: bool
     created_at: datetime

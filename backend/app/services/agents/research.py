@@ -6,6 +6,7 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from app.services.agent_tools import dispatch_tool
+from app.services.authorization import Principal
 from app.services.embeddings import EmbeddingBackend
 from app.services.llm import LLMBackend
 from app.services.agents.validator import ground_informational_answer
@@ -25,6 +26,7 @@ def run_research(
     question: str,
     top_k: int,
     document_id: str | None,
+    principal: Principal,
 ) -> dict[str, Any]:
     parsed_document_id = UUID(document_id) if document_id else None
     result = dispatch_tool(
@@ -34,6 +36,7 @@ def run_research(
         question=question,
         top_k=top_k,
         document_id=parsed_document_id,
+        principal=principal,
     )
     return {
         "excerpts": result["excerpts"],

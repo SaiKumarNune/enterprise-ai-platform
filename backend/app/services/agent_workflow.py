@@ -6,9 +6,11 @@ from uuid import UUID, uuid4
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models.document import Document
 from app.models.workflow import AgentWorkflow
 from app.services.agent_graph import CLARIFICATION_ANSWER, compile_agent_graph
+from app.services.audit import record_audit
+from app.services.authorization import DocumentAccessDenied, Principal, require_document
+from app.services.users import get_user_by_id
 from app.services.agents.trace import append_trace
 from app.services.agents.validator import validate_workflow
 from app.services.embeddings import EmbeddingBackend
@@ -33,15 +35,20 @@ def run_agent_workflow(
     request: str,
     top_k: int,
     document_id: UUID | None,
+    principal: Principal,
     owner_id: UUID | None = None,
 ) -> AgentWorkflow:
-    if document_id is not None and db.get(Document, document_id) is None:
-        raise AgentNotFoundError("document")
+    if document_id is not None:
+        try:
+            require_document(db, principal, document_id, "read")
+        except DocumentAccessDenied:
+            raise AgentNotFoundError("document") from None
     now = datetime.now(timezone.utc)
     workflow = AgentWorkflow(
         id=uuid4(),
         request=request,
-        owner_id=owner_id,
+        owner_id=owner_id or principal.user_id,
+        tenant_id=principal.tenant_id,
         document_id=document_id,
         top_k=top_k,
         status="running",
@@ -51,11 +58,13 @@ def run_agent_workflow(
     )
     db.add(workflow)
     db.commit()
-    graph = compile_agent_graph(db, embedder, llm)
+    graph = compile_agent_graph(db, embedder, llm, principal)
     initial = {
         "workflow_id": str(workflow.id),
         "request": request,
         "document_id": str(document_id) if document_id else None,
+        "auth_user_id": str(principal.user_id),
+        "auth_tenant_id": str(principal.tenant_id),
         "top_k": top_k,
         "step_count": 0,
         "authorized": False,
@@ -92,7 +101,9 @@ def approve_agent_workflow(
     workflow_id: UUID,
     *,
     actor_id: UUID | None = None,
+    principal: Principal | None = None,
 ) -> AgentWorkflow:
+    actor = principal or _principal_from_actor(db, actor_id)
     workflow = _claim_pending(db, workflow_id, decision="approved")
     state = _state_from_workflow(workflow)
     check = validate_workflow(state)
@@ -124,7 +135,7 @@ def approve_agent_workflow(
         return workflow
     state["resume_mode"] = "approve"
     state["authorized"] = True
-    graph = compile_agent_graph(db, embedder, llm)
+    graph = compile_agent_graph(db, embedder, llm, actor)
     try:
         next_state = graph.invoke(state, config={"recursion_limit": settings.agent_max_steps})
     except Exception:
@@ -138,6 +149,14 @@ def approve_agent_workflow(
     if workflow.execution_result:
         workflow.executed_at = workflow.executed_at or now
     workflow.updated_at = now
+    record_audit(
+        db,
+        action="workflow.approve",
+        outcome="success",
+        principal=actor,
+        resource_type="workflow",
+        resource_id=workflow.id,
+    )
     db.commit()
     db.refresh(workflow)
     return workflow
@@ -150,12 +169,14 @@ def reject_agent_workflow(
     workflow_id: UUID,
     *,
     actor_id: UUID | None = None,
+    principal: Principal | None = None,
 ) -> AgentWorkflow:
+    actor = principal or _principal_from_actor(db, actor_id)
     workflow = _claim_pending(db, workflow_id, decision="rejected")
     state = _state_from_workflow(workflow)
     state["resume_mode"] = "reject"
     state["authorized"] = False
-    graph = compile_agent_graph(db, embedder, llm)
+    graph = compile_agent_graph(db, embedder, llm, actor)
     try:
         next_state = graph.invoke(state, config={"recursion_limit": settings.agent_max_steps})
     except Exception:
@@ -169,9 +190,26 @@ def reject_agent_workflow(
     workflow.execution_result = None
     workflow.decided_at = now
     workflow.updated_at = now
+    record_audit(
+        db,
+        action="workflow.reject",
+        outcome="success",
+        principal=actor,
+        resource_type="workflow",
+        resource_id=workflow.id,
+    )
     db.commit()
     db.refresh(workflow)
     return workflow
+
+
+def _principal_from_actor(db: Session, actor_id: UUID | None) -> Principal:
+    if actor_id is None:
+        raise AgentConflictError("A trusted principal is required")
+    user = get_user_by_id(db, actor_id)
+    if user is None or not user.is_active:
+        raise AgentConflictError("Actor is not an active user")
+    return Principal.from_user(user)
 
 
 def _claim_pending(db: Session, workflow_id: UUID, *, decision: str) -> AgentWorkflow:

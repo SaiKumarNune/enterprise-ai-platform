@@ -35,7 +35,7 @@ def get_current_user(
     except ValueError as exc:
         raise UNAUTHORIZED from exc
     user = get_user_by_id(db, user_id)
-    if user is None or not user.is_active:
+    if user is None or not user.is_active or user.tenant_id is None:
         raise UNAUTHORIZED
     return user
 

@@ -12,6 +12,7 @@ from app.services.embeddings import get_embedder
 from app.services.storage import LocalStorage, get_storage
 from tests.fake_embeddings import FailingEmbedder, HashEmbedder
 from tests.pdf_fixtures import pdf_with_pages
+from tests.auth_helpers import auth_headers
 from tests.test_documents import (
     FakeSession,
     _clear_overrides,
@@ -41,9 +42,10 @@ def test_process_txt_document_creates_chunks(tmp_path: Path) -> None:
     session = FakeSession(documents=[document])
     _override_storage(tmp_path)
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.post(f"/documents/{document.id}/process")
-        chunks = client.get(f"/documents/{document.id}/chunks")
+        response = client.post(f"/documents/{document.id}/process", headers=headers)
+        chunks = client.get(f"/documents/{document.id}/chunks", headers=headers)
     finally:
         _clear_overrides()
 
@@ -75,9 +77,10 @@ def test_process_pdf_document_sets_page_numbers(
     session = FakeSession(documents=[document])
     _override_storage(tmp_path)
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.post(f"/documents/{document.id}/process")
-        chunks = client.get(f"/documents/{document.id}/chunks")
+        response = client.post(f"/documents/{document.id}/process", headers=headers)
+        chunks = client.get(f"/documents/{document.id}/chunks", headers=headers)
     finally:
         _clear_overrides()
 
@@ -106,9 +109,10 @@ def test_reprocess_replaces_existing_chunks(tmp_path: Path) -> None:
     session.chunks = [old]
     _override_storage(tmp_path)
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.post(f"/documents/{document.id}/process")
-        chunks = client.get(f"/documents/{document.id}/chunks")
+        response = client.post(f"/documents/{document.id}/process", headers=headers)
+        chunks = client.get(f"/documents/{document.id}/chunks", headers=headers)
     finally:
         _clear_overrides()
 
@@ -126,8 +130,9 @@ def test_process_rejects_when_already_processing(tmp_path: Path) -> None:
     session = FakeSession(documents=[document])
     _override_storage(tmp_path)
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.post(f"/documents/{document.id}/process")
+        response = client.post(f"/documents/{document.id}/process", headers=headers)
     finally:
         _clear_overrides()
 
@@ -139,8 +144,9 @@ def test_process_rejects_metadata_only_document(tmp_path: Path) -> None:
     session = FakeSession(documents=[document])
     _override_storage(tmp_path)
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.post(f"/documents/{document.id}/process")
+        response = client.post(f"/documents/{document.id}/process", headers=headers)
     finally:
         _clear_overrides()
 
@@ -154,8 +160,9 @@ def test_process_returns_404_when_stored_file_missing(tmp_path: Path) -> None:
     session = FakeSession(documents=[document])
     _override_storage(tmp_path)
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.post(f"/documents/{document.id}/process")
+        response = client.post(f"/documents/{document.id}/process", headers=headers)
     finally:
         _clear_overrides()
 
@@ -183,9 +190,10 @@ def test_process_keeps_old_chunks_when_embedding_fails(tmp_path: Path) -> None:
     session.chunks = [old]
     _override_storage(tmp_path)
     _override_db(session)
+    _user, headers = auth_headers(session)
     app.dependency_overrides[get_embedder] = lambda: FailingEmbedder()
     try:
-        response = client.post(f"/documents/{document.id}/process")
+        response = client.post(f"/documents/{document.id}/process", headers=headers)
     finally:
         _clear_overrides()
 
@@ -211,8 +219,9 @@ def test_process_empty_file_marks_failed(tmp_path: Path) -> None:
     session.chunks = [old]
     _override_storage(tmp_path)
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.post(f"/documents/{document.id}/process")
+        response = client.post(f"/documents/{document.id}/process", headers=headers)
     finally:
         _clear_overrides()
 
@@ -239,11 +248,11 @@ def test_list_chunks_paginates_in_index_order(tmp_path: Path) -> None:
     session.chunks = chunks
     _override_storage(tmp_path)
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
         response = client.get(
             f"/documents/{document.id}/chunks",
-            params={"skip": 1, "limit": 1},
-        )
+            params={"skip": 1, "limit": 1}, headers=headers)
     finally:
         _clear_overrides()
 
@@ -256,9 +265,10 @@ def test_process_and_chunks_return_404_and_422_for_bad_ids(tmp_path: Path) -> No
     session = FakeSession()
     _override_storage(tmp_path)
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        missing = client.post(f"/documents/{uuid.uuid4()}/process")
-        invalid = client.get("/documents/not-a-uuid/chunks")
+        missing = client.post(f"/documents/{uuid.uuid4()}/process", headers=headers)
+        invalid = client.get("/documents/not-a-uuid/chunks", headers=headers)
     finally:
         _clear_overrides()
 
@@ -270,11 +280,11 @@ def test_patch_cannot_change_processing_status() -> None:
     document = _sample_document()
     session = FakeSession(documents=[document])
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
         response = client.patch(
             f"/documents/{document.id}",
-            json={"status": "ready"},
-        )
+            json={"status": "ready"}, headers=headers)
     finally:
         _clear_overrides()
 

@@ -24,6 +24,12 @@ class AgentWorkflow(Base):
         nullable=True,
         index=True,
     )
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     document_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     top_k: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
     status: Mapped[str] = mapped_column(String(40), nullable=False, index=True)

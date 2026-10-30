@@ -49,13 +49,19 @@ def test_planner_agent_falls_back_on_malformed_and_unknown_tools() -> None:
 
 
 def test_research_agent_returns_retrieved_source_metadata() -> None:
+    from app.services.authorization import Principal
+    from tests.auth_helpers import own_session_documents, seed_user
+
     session, document = _session_with_policy()
+    user = seed_user(session)
+    own_session_documents(session, user)
     result = run_research(
         session,
         HashEmbedder(),
         question="How many vacation days do full-time employees receive?",
         top_k=5,
         document_id=str(document.id),
+        principal=Principal.from_user(user),
     )
     assert result["selected_count"] == 1
     source = result["sources"][0]
@@ -66,12 +72,18 @@ def test_research_agent_returns_retrieved_source_metadata() -> None:
 
 
 def test_research_agent_does_not_invent_sources_when_empty() -> None:
+    from app.services.authorization import Principal
+    from tests.auth_helpers import seed_user
+
+    session = FakeSession()
+    user = seed_user(session)
     result = run_research(
-        FakeSession(),
+        session,
         HashEmbedder(),
         question="How many vacation days?",
         top_k=5,
         document_id=None,
+        principal=Principal.from_user(user),
     )
     assert result["sources"] == []
     assert result["excerpts"] == []
@@ -308,9 +320,22 @@ def test_stale_pending_draft_is_revalidated_on_approve() -> None:
             "status": "pending_approval",
         },
     )
+    from app.services.authorization import Principal
+    from tests.auth_helpers import seed_user
+
     session = FakeSession()
+    actor = seed_user(session, role="manager")
+    workflow.owner_id = actor.id
+    workflow.tenant_id = actor.tenant_id
     session.add(workflow)
-    result = approve_agent_workflow(session, HashEmbedder(), SequenceLLM(["unused"]), workflow.id)
+    result = approve_agent_workflow(
+        session,
+        HashEmbedder(),
+        SequenceLLM(["unused"]),
+        workflow.id,
+        actor_id=actor.id,
+        principal=Principal.from_user(actor),
+    )
     assert result.status == "needs_clarification"
     assert result.execution_result is None
     assert result.approval_decision is None

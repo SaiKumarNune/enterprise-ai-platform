@@ -6,8 +6,11 @@ from fastapi.testclient import TestClient
 
 from app.core.database import get_db
 from app.main import app
+from app.models.acl import DocumentACL
+from app.models.audit import AuditEvent
 from app.models.chunk import DocumentChunk
 from app.models.document import Document
+from app.models.tenant import Tenant
 from app.models.user import User
 from app.models.workflow import AgentWorkflow
 from app.services.search import cosine_similarity
@@ -36,6 +39,9 @@ class FakeSession:
         self.chunks: list[DocumentChunk] = []
         self.workflows: list[AgentWorkflow] = []
         self.users: list[User] = []
+        self.tenants: list[Tenant] = []
+        self.acls: list[DocumentACL] = []
+        self.audits: list[AuditEvent] = []
         self.added: list[object] = []
         self.deleted: list[object] = []
         self.commit_called = False
@@ -48,6 +54,35 @@ class FakeSession:
 
     def add(self, obj: object) -> None:
         now = datetime.now(timezone.utc)
+        if isinstance(obj, Tenant):
+            if obj.id is None:
+                obj.id = uuid.uuid4()
+            if obj.created_at is None:
+                obj.created_at = now
+            if obj.updated_at is None:
+                obj.updated_at = now
+            self.added.append(obj)
+            if obj not in self.tenants:
+                self.tenants.append(obj)
+            return
+        if isinstance(obj, DocumentACL):
+            if obj.id is None:
+                obj.id = uuid.uuid4()
+            if obj.created_at is None:
+                obj.created_at = now
+            self.added.append(obj)
+            if obj not in self.acls:
+                self.acls.append(obj)
+            return
+        if isinstance(obj, AuditEvent):
+            if obj.id is None:
+                obj.id = uuid.uuid4()
+            if obj.created_at is None:
+                obj.created_at = now
+            self.added.append(obj)
+            if obj not in self.audits:
+                self.audits.append(obj)
+            return
         if isinstance(obj, User):
             if obj.id is None:
                 obj.id = uuid.uuid4()
@@ -127,6 +162,12 @@ class FakeSession:
             rows = self.workflows
         elif model is User:
             rows = self.users
+        elif model is Tenant:
+            rows = self.tenants
+        elif model is DocumentACL:
+            rows = self.acls
+        elif model is AuditEvent:
+            rows = self.audits
         else:
             rows = self.documents
         for item in rows:
@@ -139,10 +180,14 @@ class FakeSession:
         if isinstance(obj, DocumentChunk):
             self.chunks = [item for item in self.chunks if item.id != obj.id]
             return
+        if isinstance(obj, DocumentACL):
+            self.acls = [item for item in self.acls if item.id != obj.id]
+            return
         document = obj
         assert isinstance(document, Document)
         self.documents = [item for item in self.documents if item.id != document.id]
         self.chunks = [item for item in self.chunks if item.document_id != document.id]
+        self.acls = [item for item in self.acls if item.document_id != document.id]
 
     def execute(self, statement):
         compiled = statement.compile()
@@ -196,10 +241,13 @@ class FakeSession:
         query_embedding: list[float],
         top_k: int,
         document_id=None,
+        allowed_document_ids=None,
     ) -> list[tuple[DocumentChunk, float]]:
         rows = [
             item for item in self.chunks if getattr(item, "embedding", None) is not None
         ]
+        if allowed_document_ids is not None:
+            rows = [item for item in rows if item.document_id in allowed_document_ids]
         if document_id is not None:
             rows = [item for item in rows if item.document_id == document_id]
         scored = [
@@ -234,6 +282,12 @@ class FakeSession:
         return Result()
 
 
+def auth_headers(session: FakeSession, *, role: str = "employee"):
+    from tests.auth_helpers import auth_headers as _auth_headers
+
+    return _auth_headers(session, role=role)
+
+
 def _override_db(session: FakeSession):
     def override_get_db():
         yield session
@@ -248,11 +302,11 @@ def _clear_overrides() -> None:
 def test_create_document_returns_201() -> None:
     session = FakeSession()
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
         response = client.post(
             "/documents",
-            json={"filename": "handbook.pdf", "content_type": "application/pdf"},
-        )
+            json={"filename": "handbook.pdf", "content_type": "application/pdf"}, headers=headers)
     finally:
         _clear_overrides()
 
@@ -265,39 +319,39 @@ def test_create_document_returns_201() -> None:
     assert body["created_at"]
     assert body["updated_at"]
     assert session.commit_called
-    assert len(session.added) == 1
-    assert len(session.refreshed) == 1
+    assert any(isinstance(item, Document) for item in session.added)
+    assert any(isinstance(item, Document) for item in session.refreshed)
 
 
 def test_create_document_rejects_blank_filename() -> None:
     session = FakeSession()
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
         response = client.post(
             "/documents",
-            json={"filename": "   ", "content_type": "application/pdf"},
-        )
+            json={"filename": "   ", "content_type": "application/pdf"}, headers=headers)
     finally:
         _clear_overrides()
 
     assert response.status_code == 422
-    assert session.added == []
+    assert not any(isinstance(item, Document) for item in session.added)
     assert not session.commit_called
 
 
 def test_create_document_rejects_oversized_content_type() -> None:
     session = FakeSession()
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
         response = client.post(
             "/documents",
-            json={"filename": "handbook.pdf", "content_type": "x" * 101},
-        )
+            json={"filename": "handbook.pdf", "content_type": "x" * 101}, headers=headers)
     finally:
         _clear_overrides()
 
     assert response.status_code == 422
-    assert session.added == []
+    assert not any(isinstance(item, Document) for item in session.added)
     assert not session.commit_called
 
 
@@ -320,8 +374,9 @@ def test_list_documents_returns_records_in_query_order() -> None:
     )
     session = FakeSession(documents=[newer, older])
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.get("/documents")
+        response = client.get("/documents", headers=headers)
     finally:
         _clear_overrides()
 
@@ -350,8 +405,9 @@ def test_get_document_returns_200() -> None:
     document = _sample_document()
     session = FakeSession(documents=[document])
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.get(f"/documents/{document.id}")
+        response = client.get(f"/documents/{document.id}", headers=headers)
     finally:
         _clear_overrides()
 
@@ -366,8 +422,9 @@ def test_get_document_returns_200() -> None:
 def test_get_document_returns_404_when_missing() -> None:
     session = FakeSession()
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.get(f"/documents/{uuid.uuid4()}")
+        response = client.get(f"/documents/{uuid.uuid4()}", headers=headers)
     finally:
         _clear_overrides()
 
@@ -378,8 +435,9 @@ def test_get_document_returns_404_when_missing() -> None:
 def test_get_document_returns_422_for_invalid_uuid() -> None:
     session = FakeSession()
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.get("/documents/not-a-uuid")
+        response = client.get("/documents/not-a-uuid", headers=headers)
     finally:
         _clear_overrides()
 
@@ -390,8 +448,9 @@ def test_delete_document_returns_204() -> None:
     document = _sample_document()
     session = FakeSession(documents=[document])
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.delete(f"/documents/{document.id}")
+        response = client.delete(f"/documents/{document.id}", headers=headers)
     finally:
         _clear_overrides()
 
@@ -405,8 +464,9 @@ def test_delete_document_returns_204() -> None:
 def test_delete_document_returns_404_when_missing() -> None:
     session = FakeSession()
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.delete(f"/documents/{uuid.uuid4()}")
+        response = client.delete(f"/documents/{uuid.uuid4()}", headers=headers)
     finally:
         _clear_overrides()
 
@@ -419,8 +479,9 @@ def test_delete_document_returns_404_when_missing() -> None:
 def test_delete_document_returns_422_for_invalid_uuid() -> None:
     session = FakeSession()
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.delete("/documents/not-a-uuid")
+        response = client.delete("/documents/not-a-uuid", headers=headers)
     finally:
         _clear_overrides()
 
@@ -434,8 +495,9 @@ def test_list_documents_paginates_with_skip_and_limit() -> None:
     third = _sample_document("third.pdf")
     session = FakeSession(documents=[first, second, third])
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.get("/documents", params={"skip": 1, "limit": 1})
+        response = client.get("/documents", params={"skip": 1, "limit": 1}, headers=headers)
     finally:
         _clear_overrides()
 
@@ -450,9 +512,10 @@ def test_list_documents_paginates_with_skip_and_limit() -> None:
 def test_list_documents_rejects_invalid_pagination() -> None:
     session = FakeSession()
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        too_large = client.get("/documents", params={"limit": 101})
-        negative = client.get("/documents", params={"skip": -1})
+        too_large = client.get("/documents", params={"limit": 101}, headers=headers)
+        negative = client.get("/documents", params={"skip": -1}, headers=headers)
     finally:
         _clear_overrides()
 
@@ -464,11 +527,11 @@ def test_patch_document_updates_metadata() -> None:
     document = _sample_document()
     session = FakeSession(documents=[document])
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
         response = client.patch(
             f"/documents/{document.id}",
-            json={"filename": "renamed.txt"},
-        )
+            json={"filename": "renamed.txt"}, headers=headers)
     finally:
         _clear_overrides()
 
@@ -483,11 +546,11 @@ def test_patch_document_updates_metadata() -> None:
 def test_patch_document_returns_404_when_missing() -> None:
     session = FakeSession()
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
         response = client.patch(
             f"/documents/{uuid.uuid4()}",
-            json={"filename": "renamed.txt"},
-        )
+            json={"filename": "renamed.txt"}, headers=headers)
     finally:
         _clear_overrides()
 
@@ -498,13 +561,13 @@ def test_patch_document_returns_422_for_invalid_input() -> None:
     document = _sample_document()
     session = FakeSession(documents=[document])
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        invalid_uuid = client.patch("/documents/not-a-uuid", json={"filename": "x"})
-        blank = client.patch(f"/documents/{document.id}", json={"filename": "  "})
+        invalid_uuid = client.patch("/documents/not-a-uuid", json={"filename": "x"}, headers=headers)
+        blank = client.patch(f"/documents/{document.id}", json={"filename": "  "}, headers=headers)
         bad_status = client.patch(
             f"/documents/{document.id}",
-            json={"status": "not-a-status"},
-        )
+            json={"status": "not-a-status"}, headers=headers)
     finally:
         _clear_overrides()
 
@@ -517,8 +580,9 @@ def test_patch_document_returns_422_for_invalid_input() -> None:
 def test_list_documents_returns_empty_list() -> None:
     session = FakeSession()
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.get("/documents")
+        response = client.get("/documents", headers=headers)
     finally:
         _clear_overrides()
 

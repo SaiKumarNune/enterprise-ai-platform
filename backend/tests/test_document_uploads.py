@@ -8,6 +8,7 @@ from app.core.database import get_db
 from app.main import app
 from app.models.document import Document
 from app.services.storage import LocalStorage, get_storage
+from tests.auth_helpers import auth_headers
 from tests.test_documents import FakeSession, _clear_overrides, _override_db, _sample_document
 
 client = TestClient(app)
@@ -29,11 +30,11 @@ def test_upload_pdf_returns_201(tmp_path: Path) -> None:
     session = FakeSession()
     storage = _override_storage(tmp_path)
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
         response = client.post(
             "/documents/upload",
-            files={"file": ("handbook.pdf", MINIMAL_PDF, "application/octet-stream")},
-        )
+            files={"file": ("handbook.pdf", MINIMAL_PDF, "application/octet-stream")}, headers=headers)
     finally:
         _clear_overrides()
 
@@ -51,11 +52,11 @@ def test_upload_txt_returns_201(tmp_path: Path) -> None:
     session = FakeSession()
     _override_storage(tmp_path)
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
         response = client.post(
             "/documents/upload",
-            files={"file": ("notes.txt", b"hello knowledge base\n", "application/octet-stream")},
-        )
+            files={"file": ("notes.txt", b"hello knowledge base\n", "application/octet-stream")}, headers=headers)
     finally:
         _clear_overrides()
 
@@ -70,16 +71,16 @@ def test_upload_rejects_unsupported_type(tmp_path: Path) -> None:
     session = FakeSession()
     storage = _override_storage(tmp_path)
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
         response = client.post(
             "/documents/upload",
-            files={"file": ("image.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 16, "image/png")},
-        )
+            files={"file": ("image.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 16, "image/png")}, headers=headers)
     finally:
         _clear_overrides()
 
     assert response.status_code == 415
-    assert session.added == []
+    assert not any(isinstance(item, Document) for item in session.added)
     assert list(storage.root.glob("*")) == []
 
 
@@ -87,32 +88,32 @@ def test_upload_rejects_invalid_pdf(tmp_path: Path) -> None:
     session = FakeSession()
     _override_storage(tmp_path)
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
         response = client.post(
             "/documents/upload",
-            files={"file": ("bad.pdf", b"%PDF-1.4\nthis is not a finished pdf", "application/pdf")},
-        )
+            files={"file": ("bad.pdf", b"%PDF-1.4\nthis is not a finished pdf", "application/pdf")}, headers=headers)
     finally:
         _clear_overrides()
 
     assert response.status_code == 415
-    assert session.added == []
+    assert not any(isinstance(item, Document) for item in session.added)
 
 
 def test_upload_rejects_oversized_file(tmp_path: Path) -> None:
     session = FakeSession()
     storage = _override_storage(tmp_path, max_bytes=32)
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
         response = client.post(
             "/documents/upload",
-            files={"file": ("big.txt", b"a" * 200, "text/plain")},
-        )
+            files={"file": ("big.txt", b"a" * 200, "text/plain")}, headers=headers)
     finally:
         _clear_overrides()
 
     assert response.status_code == 413
-    assert session.added == []
+    assert not any(isinstance(item, Document) for item in session.added)
     assert list(tmp_path.glob("*")) == []
     assert storage.root == tmp_path
 
@@ -121,11 +122,11 @@ def test_upload_removes_file_when_commit_fails(tmp_path: Path) -> None:
     session = FakeSession(fail_commit=True)
     storage = _override_storage(tmp_path)
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
         response = client.post(
             "/documents/upload",
-            files={"file": ("handbook.pdf", MINIMAL_PDF, "application/pdf")},
-        )
+            files={"file": ("handbook.pdf", MINIMAL_PDF, "application/pdf")}, headers=headers)
     finally:
         _clear_overrides()
 
@@ -143,8 +144,9 @@ def test_download_returns_stored_file(tmp_path: Path) -> None:
     session = FakeSession(documents=[document])
     _override_storage(tmp_path)
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.get(f"/documents/{document.id}/download")
+        response = client.get(f"/documents/{document.id}/download", headers=headers)
     finally:
         _clear_overrides()
 
@@ -161,8 +163,9 @@ def test_download_returns_404_when_file_missing(tmp_path: Path) -> None:
     session = FakeSession(documents=[document])
     _override_storage(tmp_path)
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.get(f"/documents/{document.id}/download")
+        response = client.get(f"/documents/{document.id}/download", headers=headers)
     finally:
         _clear_overrides()
 
@@ -175,8 +178,9 @@ def test_download_returns_404_for_metadata_only_document(tmp_path: Path) -> None
     session = FakeSession(documents=[document])
     _override_storage(tmp_path)
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.get(f"/documents/{document.id}/download")
+        response = client.get(f"/documents/{document.id}/download", headers=headers)
     finally:
         _clear_overrides()
 
@@ -200,8 +204,9 @@ def test_delete_removes_stored_file(tmp_path: Path) -> None:
     session = FakeSession(documents=[document])
     _override_storage(tmp_path)
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.delete(f"/documents/{document.id}")
+        response = client.delete(f"/documents/{document.id}", headers=headers)
     finally:
         _clear_overrides()
 
@@ -215,8 +220,9 @@ def test_delete_preserves_metadata_only_records(tmp_path: Path) -> None:
     session = FakeSession(documents=[document])
     _override_storage(tmp_path)
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.delete(f"/documents/{document.id}")
+        response = client.delete(f"/documents/{document.id}", headers=headers)
     finally:
         _clear_overrides()
 

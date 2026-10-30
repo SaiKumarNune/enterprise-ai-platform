@@ -343,7 +343,18 @@ def test_concurrent_approval_executes_once() -> None:
 
     def _approve() -> None:
         try:
-            approve_agent_workflow(session, embedder, llm, workflow_id)
+            from app.services.authorization import Principal
+            from app.models.user import MANAGER
+
+            manager = next(user for user in session.users if user.role == MANAGER)
+            approve_agent_workflow(
+                session,
+                embedder,
+                llm,
+                workflow_id,
+                actor_id=manager.id,
+                principal=Principal.from_user(manager),
+            )
             outcomes.append("ok")
         except AgentConflictError:
             outcomes.append("conflict")

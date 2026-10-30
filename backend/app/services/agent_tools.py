@@ -9,6 +9,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from app.services.authorization import Principal
 from app.services.embeddings import EmbeddingBackend
 from app.services.rag import retrieve_evidence, rewrite_citations
 
@@ -148,12 +149,14 @@ def knowledge_search(
     question: str,
     top_k: int,
     document_id: UUID | None,
+    principal: Principal,
 ) -> dict[str, Any]:
     selected, sources, retrieval_count = retrieve_evidence(
         db,
         embedder,
         question=question,
         top_k=top_k,
+        principal=principal,
         document_id=document_id,
     )
     excerpts = [

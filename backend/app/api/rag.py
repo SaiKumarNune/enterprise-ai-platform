@@ -1,9 +1,13 @@
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.api.deps import get_current_user
 from app.core.database import get_db
-from app.models.document import Document
+from app.models.user import User
 from app.schemas.rag import RagAskRequest, RagAskResponse, RagSourceResponse
+from app.services.authorization import DocumentAccessDenied, Principal
 from app.services.embeddings import EmbeddingBackend, EmbeddingError, get_embedder
 from app.services.llm import (
     LLMBackend,
@@ -15,22 +19,18 @@ from app.services.llm import (
 from app.services.rag import answer_question
 
 router = APIRouter()
+CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
 @router.post("/rag/ask", response_model=RagAskResponse)
 def ask_rag(
     payload: RagAskRequest,
+    user: CurrentUser,
     db: Session = Depends(get_db),
     embedder: EmbeddingBackend = Depends(get_embedder),
     llm: LLMBackend = Depends(get_llm),
 ) -> RagAskResponse:
-    if payload.document_id is not None:
-        document = db.get(Document, payload.document_id)
-        if document is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Document not found",
-            )
+    principal = Principal.from_user(user)
     try:
         result = answer_question(
             db,
@@ -38,7 +38,13 @@ def ask_rag(
             llm,
             question=payload.question,
             top_k=payload.top_k,
+            principal=principal,
             document_id=payload.document_id,
+        )
+    except DocumentAccessDenied:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found",
         )
     except EmbeddingError as exc:
         raise HTTPException(

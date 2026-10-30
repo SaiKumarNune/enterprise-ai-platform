@@ -6,6 +6,7 @@ from langgraph.graph import END, START, StateGraph
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.services.authorization import Principal
 from app.services.agents.action import cited_sources, execute_simulated_action, prepare_leave_draft
 from app.services.agents.planner import run_planner
 from app.services.agents.research import run_research, synthesize_informational_answer
@@ -61,6 +62,7 @@ def compile_agent_graph(
     db: Session,
     embedder: EmbeddingBackend,
     llm: LLMBackend,
+    principal: Principal,
 ):
     def planner_agent(state: AgentState) -> dict[str, Any]:
         if _over_limit(state):
@@ -88,6 +90,7 @@ def compile_agent_graph(
             question=state["request"],
             top_k=int(state.get("top_k") or 5),
             document_id=state.get("document_id"),
+            principal=principal,
         )
         update: dict[str, Any] = {
             **retrieved,

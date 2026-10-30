@@ -43,6 +43,8 @@ class DocumentResponse(BaseModel):
 
     id: UUID
     filename: str
+    tenant_id: UUID | None = None
+    owner_id: UUID | None = None
     content_type: str
     status: str
     created_at: datetime

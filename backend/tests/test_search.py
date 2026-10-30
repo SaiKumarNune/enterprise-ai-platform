@@ -7,6 +7,7 @@ from app.main import app
 from app.models.chunk import DocumentChunk
 from app.services.embeddings import get_embedder
 from tests.fake_embeddings import FailingEmbedder, HashEmbedder
+from tests.auth_helpers import auth_headers
 from tests.test_documents import FakeSession, _clear_overrides, _override_db, _sample_document
 
 client = TestClient(app)
@@ -32,8 +33,9 @@ def test_search_ranks_semantic_matches_first() -> None:
     session = FakeSession(documents=[document])
     session.chunks = [engine, apple]
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.post("/search", json={"query": "apple pie", "top_k": 2})
+        response = client.post("/search", json={"query": "apple pie", "top_k": 2}, headers=headers)
     finally:
         _clear_overrides()
 
@@ -58,11 +60,11 @@ def test_search_filters_by_document_id() -> None:
     session = FakeSession(documents=[first, second])
     session.chunks = [keep, other]
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
         response = client.post(
             "/search",
-            json={"query": "apple", "top_k": 5, "document_id": str(first.id)},
-        )
+            json={"query": "apple", "top_k": 5, "document_id": str(first.id)}, headers=headers)
     finally:
         _clear_overrides()
 
@@ -87,8 +89,9 @@ def test_search_excludes_chunks_without_embeddings() -> None:
     session = FakeSession(documents=[document])
     session.chunks = [bare, with_vector]
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.post("/search", json={"query": "searchable", "top_k": 5})
+        response = client.post("/search", json={"query": "searchable", "top_k": 5}, headers=headers)
     finally:
         _clear_overrides()
 
@@ -99,8 +102,9 @@ def test_search_excludes_chunks_without_embeddings() -> None:
 def test_search_returns_empty_list_when_no_matches() -> None:
     session = FakeSession()
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        response = client.post("/search", json={"query": "anything", "top_k": 3})
+        response = client.post("/search", json={"query": "anything", "top_k": 3}, headers=headers)
     finally:
         _clear_overrides()
 
@@ -111,10 +115,11 @@ def test_search_returns_empty_list_when_no_matches() -> None:
 def test_search_validates_query_and_top_k() -> None:
     session = FakeSession()
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
-        blank = client.post("/search", json={"query": "   ", "top_k": 3})
-        too_large = client.post("/search", json={"query": "hello", "top_k": 51})
-        too_small = client.post("/search", json={"query": "hello", "top_k": 0})
+        blank = client.post("/search", json={"query": "   ", "top_k": 3}, headers=headers)
+        too_large = client.post("/search", json={"query": "hello", "top_k": 51}, headers=headers)
+        too_small = client.post("/search", json={"query": "hello", "top_k": 0}, headers=headers)
     finally:
         _clear_overrides()
 
@@ -126,10 +131,12 @@ def test_search_validates_query_and_top_k() -> None:
 def test_search_returns_404_for_unknown_document_filter() -> None:
     session = FakeSession()
     _override_db(session)
+    _user, headers = auth_headers(session)
     try:
         response = client.post(
             "/search",
             json={"query": "hello", "document_id": str(uuid.uuid4())},
+            headers=headers,
         )
     finally:
         _clear_overrides()
@@ -140,9 +147,10 @@ def test_search_returns_404_for_unknown_document_filter() -> None:
 def test_search_handles_embedding_failure() -> None:
     session = FakeSession()
     _override_db(session)
+    _user, headers = auth_headers(session)
     app.dependency_overrides[get_embedder] = lambda: FailingEmbedder()
     try:
-        response = client.post("/search", json={"query": "hello"})
+        response = client.post("/search", json={"query": "hello"}, headers=headers)
     finally:
         _clear_overrides()
 

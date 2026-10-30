@@ -7,6 +7,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.chunk import DocumentChunk
+from app.models.document import Document
+from app.services.authorization import (
+    Principal,
+    authorized_document_clause,
+    authorized_document_ids,
+    require_document,
+)
 
 
 def search_similar_chunks(
@@ -14,17 +21,25 @@ def search_similar_chunks(
     query_embedding: list[float],
     *,
     top_k: int,
+    principal: Principal,
     document_id: UUID | None = None,
 ) -> list[tuple[DocumentChunk, float]]:
+    if document_id is not None:
+        require_document(db, principal, document_id, "read")
     in_memory = getattr(db, "search_chunks", None)
     if callable(in_memory):
-        return in_memory(query_embedding, top_k, document_id)
+        allowed = authorized_document_ids(db, principal, "read")
+        if document_id is not None:
+            allowed = allowed & {document_id}
+        return in_memory(query_embedding, top_k, document_id, allowed_document_ids=allowed)
 
     distance = DocumentChunk.embedding.cosine_distance(query_embedding)
     similarity = (1 - distance).label("similarity")
     statement = (
         select(DocumentChunk, similarity)
+        .join(Document, Document.id == DocumentChunk.document_id)
         .where(DocumentChunk.embedding.is_not(None))
+        .where(authorized_document_clause(principal, "read"))
         .order_by(distance)
         .limit(top_k)
     )

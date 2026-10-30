@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Annotated
 from urllib.parse import quote
 from uuid import UUID
 
@@ -7,15 +8,28 @@ from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.api.deps import get_current_user
 from app.core.config import settings
 from app.core.database import get_db
+from app.models.acl import DocumentACL
 from app.models.chunk import DocumentChunk
 from app.models.document import Document
+from app.models.user import User
 from app.schemas.chunk import DocumentChunkResponse
 from app.schemas.document import DocumentCreate, DocumentResponse, DocumentUpdate
+from app.schemas.permission import PermissionGrantRequest, PermissionGrantResponse
+from app.services.audit import record_audit
+from app.services.authorization import (
+    DocumentAccessDenied,
+    Principal,
+    authorized_document_clause,
+    has_privilege,
+    require_document,
+)
 from app.services.embeddings import EmbeddingBackend, EmbeddingError, get_embedder
 from app.services.extraction import EmptyDocumentError, ExtractionError
 from app.services.ingestion import IngestionConflictError, process_stored_document
+from app.services.permissions import PermissionError, grant_privilege, list_grants, revoke_privilege
 from app.services.storage import (
     FileTooLargeError,
     InvalidFileContentError,
@@ -26,6 +40,7 @@ from app.services.storage import (
 )
 
 router = APIRouter()
+CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
 def _not_found() -> HTTPException:
@@ -35,6 +50,34 @@ def _not_found() -> HTTPException:
     )
 
 
+def _principal(user: User) -> Principal:
+    return Principal.from_user(user)
+
+
+def _authorized_document(
+    db: Session,
+    principal: Principal,
+    document_id: UUID,
+    minimum: str,
+) -> Document:
+    try:
+        return require_document(db, principal, document_id, minimum)
+    except DocumentAccessDenied:
+        existing = db.get(Document, document_id)
+        if existing is not None:
+            record_audit(
+                db,
+                action="document.access_denied",
+                outcome="denied",
+                principal=principal,
+                resource_type="document",
+                resource_id=document_id,
+                details={"privilege": minimum},
+            )
+            db.commit()
+        raise _not_found() from None
+
+
 @router.post(
     "/documents",
     response_model=DocumentResponse,
@@ -42,13 +85,25 @@ def _not_found() -> HTTPException:
 )
 def create_document(
     payload: DocumentCreate,
+    user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> Document:
+    principal = _principal(user)
     document = Document(
         filename=payload.filename,
         content_type=payload.content_type,
+        tenant_id=principal.tenant_id,
+        owner_id=principal.user_id,
     )
     db.add(document)
+    record_audit(
+        db,
+        action="document.create",
+        outcome="success",
+        principal=principal,
+        resource_type="document",
+        resource_id=document.id,
+    )
     db.commit()
     db.refresh(document)
     return document
@@ -60,10 +115,12 @@ def create_document(
     status_code=status.HTTP_201_CREATED,
 )
 def upload_document(
+    user: CurrentUser,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     storage: LocalStorage = Depends(get_storage),
 ) -> Document:
+    principal = _principal(user)
     stored = None
     try:
         stored = storage.save_upload(file)
@@ -71,8 +128,18 @@ def upload_document(
             filename=stored.filename,
             content_type=stored.content_type,
             storage_path=stored.storage_path,
+            tenant_id=principal.tenant_id,
+            owner_id=principal.user_id,
         )
         db.add(document)
+        record_audit(
+            db,
+            action="document.upload",
+            outcome="success",
+            principal=principal,
+            resource_type="document",
+            resource_id=document.id,
+        )
         db.commit()
         db.refresh(document)
         return document
@@ -105,39 +172,44 @@ def upload_document(
 
 @router.get("/documents", response_model=list[DocumentResponse])
 def list_documents(
+    user: CurrentUser,
     db: Session = Depends(get_db),
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
 ) -> list[Document]:
+    principal = _principal(user)
     statement = (
         select(Document)
+        .where(authorized_document_clause(principal, "read"))
         .order_by(Document.created_at.desc(), Document.id.desc())
         .offset(skip)
         .limit(limit)
     )
+    if hasattr(db, "documents"):
+        db.last_statement = statement
+        rows = [item for item in db.documents if has_privilege(db, principal, item, "read")]
+        rows.sort(key=lambda item: (item.created_at, item.id), reverse=True)
+        return rows[skip : skip + limit]
     return list(db.scalars(statement).all())
 
 
 @router.get("/documents/{document_id}", response_model=DocumentResponse)
 def get_document(
     document_id: UUID,
+    user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> Document:
-    document = db.get(Document, document_id)
-    if document is None:
-        raise _not_found()
-    return document
+    return _authorized_document(db, _principal(user), document_id, "read")
 
 
 @router.patch("/documents/{document_id}", response_model=DocumentResponse)
 def update_document(
     document_id: UUID,
     payload: DocumentUpdate,
+    user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> Document:
-    document = db.get(Document, document_id)
-    if document is None:
-        raise _not_found()
+    document = _authorized_document(db, _principal(user), document_id, "write")
     updates = payload.model_dump(exclude_unset=True)
     for field_name, value in updates.items():
         setattr(document, field_name, value)
@@ -149,13 +221,12 @@ def update_document(
 @router.post("/documents/{document_id}/process", response_model=DocumentResponse)
 def process_document(
     document_id: UUID,
+    user: CurrentUser,
     db: Session = Depends(get_db),
     storage: LocalStorage = Depends(get_storage),
     embedder: EmbeddingBackend = Depends(get_embedder),
 ) -> Document:
-    document = db.get(Document, document_id)
-    if document is None:
-        raise _not_found()
+    document = _authorized_document(db, _principal(user), document_id, "write")
     try:
         return process_stored_document(
             db,
@@ -205,13 +276,12 @@ def process_document(
 )
 def list_document_chunks(
     document_id: UUID,
+    user: CurrentUser,
     db: Session = Depends(get_db),
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
 ) -> list[DocumentChunk]:
-    document = db.get(Document, document_id)
-    if document is None:
-        raise _not_found()
+    _authorized_document(db, _principal(user), document_id, "read")
     statement = (
         select(DocumentChunk)
         .where(DocumentChunk.document_id == document_id)
@@ -225,12 +295,11 @@ def list_document_chunks(
 @router.get("/documents/{document_id}/download")
 def download_document(
     document_id: UUID,
+    user: CurrentUser,
     db: Session = Depends(get_db),
     storage: LocalStorage = Depends(get_storage),
 ) -> FileResponse:
-    document = db.get(Document, document_id)
-    if document is None:
-        raise _not_found()
+    document = _authorized_document(db, _principal(user), document_id, "read")
     if not document.storage_path:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -260,21 +329,77 @@ def download_document(
     )
 
 
+@router.get("/documents/{document_id}/permissions", response_model=list[PermissionGrantResponse])
+def list_document_permissions(
+    document_id: UUID,
+    user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> list[DocumentACL]:
+    _authorized_document(db, _principal(user), document_id, "manage")
+    return list_grants(db, document_id)
+
+
+@router.put("/documents/{document_id}/permissions", response_model=PermissionGrantResponse)
+def grant_document_permission(
+    document_id: UUID,
+    payload: PermissionGrantRequest,
+    user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> DocumentACL:
+    principal = _principal(user)
+    document = _authorized_document(db, principal, document_id, "manage")
+    try:
+        return grant_privilege(
+            db,
+            principal,
+            document=document,
+            target_user_id=payload.user_id,
+            privilege=payload.privilege,
+        )
+    except PermissionError as exc:
+        code = status.HTTP_403_FORBIDDEN if exc.code in {"forbidden", "escalation"} else status.HTTP_404_NOT_FOUND
+        if exc.code == "invalid_privilege":
+            code = status.HTTP_422_UNPROCESSABLE_CONTENT
+        raise HTTPException(status_code=code, detail=exc.message) from exc
+
+
+@router.delete("/documents/{document_id}/permissions/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def revoke_document_permission(
+    document_id: UUID,
+    user_id: UUID,
+    user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> None:
+    principal = _principal(user)
+    document = _authorized_document(db, principal, document_id, "manage")
+    try:
+        revoke_privilege(db, principal, document=document, target_user_id=user_id)
+    except PermissionError as exc:
+        code = status.HTTP_403_FORBIDDEN if exc.code == "forbidden" else status.HTTP_404_NOT_FOUND
+        raise HTTPException(status_code=code, detail=exc.message) from exc
+
+
 @router.delete(
     "/documents/{document_id}",
     status_code=status.HTTP_204_NO_CONTENT,
 )
 def delete_document(
     document_id: UUID,
+    user: CurrentUser,
     db: Session = Depends(get_db),
     storage: LocalStorage = Depends(get_storage),
 ) -> None:
-    document = db.get(Document, document_id)
-    if document is None:
-        raise _not_found()
+    principal = _principal(user)
+    document = _authorized_document(db, principal, document_id, "manage")
     storage_path = document.storage_path
+    record_audit(
+        db,
+        action="document.delete",
+        outcome="success",
+        principal=principal,
+        resource_type="document",
+        resource_id=document.id,
+    )
     db.delete(document)
     db.commit()
-    # Best-effort cleanup after a successful commit. If unlink fails, the
-    # database row is already gone and an orphan file may remain on disk.
     storage.delete(storage_path)

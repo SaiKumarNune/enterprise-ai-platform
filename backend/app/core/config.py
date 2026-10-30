@@ -36,6 +36,7 @@ class Settings:
     jwt_secret: str = field(repr=False)
     jwt_algorithm: str
     jwt_expire_minutes: int
+    default_tenant_id: str
 
     @property
     def database_url(self) -> str:
@@ -79,6 +80,7 @@ def _load_settings() -> Settings:
         jwt_secret=os.getenv("JWT_SECRET", ""),
         jwt_algorithm=os.getenv("JWT_ALGORITHM", "HS256"),
         jwt_expire_minutes=int(os.getenv("JWT_EXPIRE_MINUTES", "60")),
+        default_tenant_id=os.getenv("DEFAULT_TENANT_ID", ""),
     )
 
 

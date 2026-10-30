@@ -25,8 +25,10 @@ if str(BACKEND) not in sys.path:
 
 from app.models.chunk import DocumentChunk  # noqa: E402
 from app.models.document import Document  # noqa: E402
+from app.services.authorization import Principal  # noqa: E402
 from app.services.rag import INSUFFICIENT_ANSWER, answer_question  # noqa: E402
 from app.services.search import search_similar_chunks  # noqa: E402
+from tests.auth_helpers import own_session_documents, seed_user  # noqa: E402
 from tests.fake_embeddings import HashEmbedder  # noqa: E402
 from tests.test_documents import FakeSession  # noqa: E402
 
@@ -97,7 +99,9 @@ def build_session(dataset: dict, embedder: HashEmbedder) -> tuple[FakeSession, d
             )
     session = FakeSession(documents=documents)
     session.chunks = chunks
-    return session, document_ids, chunk_ids
+    owner = seed_user(session)
+    own_session_documents(session, owner)
+    return session, document_ids, chunk_ids, owner
 
 
 def recall_at_k(retrieved: list[uuid.UUID], gold: list[uuid.UUID]) -> float | None:
@@ -111,7 +115,8 @@ def run_eval(dataset_path: Path, top_k: int) -> dict:
     dataset = load_dataset(dataset_path)
     embedder = HashEmbedder()
     llm = DatasetLLM()
-    session, document_ids, chunk_ids = build_session(dataset, embedder)
+    session, document_ids, chunk_ids, owner = build_session(dataset, embedder)
+    principal = Principal.from_user(owner)
     results: list[CaseResult] = []
 
     for case in dataset["cases"]:
@@ -123,6 +128,7 @@ def run_eval(dataset_path: Path, top_k: int) -> dict:
             session,
             query_vector,
             top_k=top_k,
+            principal=principal,
             document_id=document_uuid,
         )
         retrieved_ids = [chunk.id for chunk, _score in retrieved_rows]
@@ -133,6 +139,7 @@ def run_eval(dataset_path: Path, top_k: int) -> dict:
             llm,
             question=case["question"],
             top_k=top_k,
+            principal=principal,
             document_id=document_uuid,
         )
         latency_ms = int((time.perf_counter() - started) * 1000)

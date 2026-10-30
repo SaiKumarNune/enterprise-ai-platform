@@ -40,7 +40,33 @@ alembic current
 alembic upgrade head
 ```
 
-Phase 9 revision `a9b0c1d2e3f4` (users + workflow owner/decision actor) revises `f8a2b3c4d5e6`. Additive only; it does not drop tables or reset volumes.
+Phase 10 revision `b0c1d2e3f4a5` (tenants, document owner/ACL, audit) revises `a9b0c1d2e3f4`. Additive only; it does not drop tables or reset volumes.
+
+**Existing data:** if `users`, `documents`, or `agent_workflows` already have rows, set `LEGACY_TENANT_ID`. Do **not** set `LEGACY_DOCUMENT_OWNER_ID` (blanket assignment is rejected). Map only verified documents:
+
+```bash
+LEGACY_TENANT_ID=<new-or-chosen-tenant-uuid> \
+LEGACY_TENANT_NAME=Legacy \
+LEGACY_DOCUMENT_OWNERS_BY_FILENAME='{"vacation_policy.txt":"<user-uuid>","Sai_Kumar_Nune_AI.pdf":"<user-uuid>"}' \
+alembic upgrade head
+```
+
+Unmapped files such as `employee_handbook.pdf` stay **quarantined** (`owner_id` null). They are hidden from `/documents`, `/search`, `/rag/ask`, and agents, including ordinary tenant-admin access, until a tenant admin reviews metadata at `GET /admin/documents/quarantine` and assigns an owner with `POST /admin/documents/{id}/assign-owner`. That review response does not include file content or `storage_path`.
+
+Look up IDs first:
+
+```bash
+docker compose exec db psql -U enterprise_user -d enterprise_ai -c "SELECT id, email FROM users;"
+docker compose exec db psql -U enterprise_user -d enterprise_ai -c "SELECT id, filename FROM documents;"
+```
+
+Rollback (destroys tenant/ACL/audit schema added by this revision, not document rows themselves):
+
+```bash
+alembic downgrade a9b0c1d2e3f4
+```
+
+Greenfield databases create tenant `00000000-0000-4000-8000-000000000001` (`default`). Set `DEFAULT_TENANT_ID` to that value for self-registration.
 
 ## Authentication and RBAC
 
@@ -57,7 +83,19 @@ Roles are `employee`, `manager`, and `admin`. Self-registration always creates a
 | `POST` | `/agents/{id}/approve` | Manager or admin. |
 | `POST` | `/agents/{id}/reject` | Manager or admin. |
 
-`/health`, `/db-health`, `/documents`, `/search`, and `/rag/ask` remain **unauthenticated** in this phase.
+`/health` and `/db-health` remain unauthenticated. Document, search, RAG, and agent routes require a JWT. Admins are **tenant-scoped** and cannot read or approve another tenant's resources.
+
+### Document permission matrix
+
+Privileges are `read`, `write`, and `manage` (`manage` includes write and read). Decisions use the authenticated user loaded from the database, never request-supplied IDs.
+
+| Actor | Own documents | Same-tenant documents | Other tenants |
+|---|---|---|---|
+| Employee | manage (as owner) | none unless shared via ACL | none (404) |
+| Manager | manage (as owner) | no automatic document access; can approve **same-tenant** workflows | none (404) |
+| Admin | manage | manage assigned documents in **their** tenant; quarantined docs are **not** readable | none (404) |
+
+`PUT /documents/{id}/permissions` and `DELETE /documents/{id}/permissions/{user_id}` require `manage`. Users cannot grant privileges to themselves. Shares cannot cross tenants. Vector search applies this filter **in the retrieval query** before ranking and `top_k`.
 
 ### Development-only admin bootstrap
 
@@ -94,7 +132,11 @@ Unset those variables afterward. This is not an HR identity provider.
 8. `GET /agents/{workflow_id}` as the employee.
 9. `POST /agents/{workflow_id}/approve` as the employee — expect **403**.
 10. Bootstrap a manager/admin with the CLI above (or a second user whose role was set only via bootstrap). Login as that user, Authorize with the new token.
-11. `POST /agents/{workflow_id}/approve` — manager/admin only. A second approve returns **409**. Stale invalid pending drafts return `needs_clarification` and are not executed.
+11. `POST /agents/{workflow_id}/approve` — manager/admin only, **same tenant**. A second approve returns **409**. Stale invalid pending drafts return `needs_clarification` and are not executed.
+12. As the employee, `POST /documents/upload` a text file, then `POST /documents/{id}/process`. `GET /documents` should list only that file.
+13. As a second employee in the same tenant, `GET /documents/{id}` should be **404** until the owner `PUT /documents/{id}/permissions` with `{"user_id":"<colleague-id>","privilege":"read"}`.
+14. As an admin from another tenant, `GET` of that document and `POST /agents/{id}/approve` of the first tenant's workflow should be **404**.
+15. After migrating legacy data, tenant admin `GET /admin/documents/quarantine` should list `employee_handbook.pdf` metadata only. Ordinary `GET /documents/{id}` stays **404** until `POST /admin/documents/{id}/assign-owner`.
 
 Sample login:
 
@@ -120,7 +162,10 @@ curl -X POST http://127.0.0.1:8000/agents/run \
 | `DELETE` | `/documents/{id}` | Metadata, chunks, best-effort file cleanup |
 | `POST` | `/documents/upload` | PDF or UTF-8 text |
 | `GET` | `/documents/{id}/download` | Download stored file |
-| `POST` | `/documents/{id}/process` | Extract, chunk, embed, persist |
+| `POST` | `/documents/{id}/process` | Extract, chunk, embed, persist (write) |
+| `GET` | `/documents/{id}/permissions` | List ACL grants (manage) |
+| `PUT` | `/documents/{id}/permissions` | Grant `read`/`write`/`manage` (manage) |
+| `DELETE` | `/documents/{id}/permissions/{user_id}` | Revoke ACL grant (manage) |
 | `GET` | `/documents/{id}/chunks` | Ordered chunk list |
 | `POST` | `/search` | Semantic search over chunk embeddings |
 | `POST` | `/rag/ask` | Citation-grounded RAG answer from retrieved chunks |
@@ -225,7 +270,7 @@ LangGraph is in-process orchestration only. PostgreSQL `agent_workflows` (includ
 Allowlisted tools: `knowledge_search`, `prepare_approval_request`, `execute_approved_action`. Only `POST /agents/{id}/approve` sets `authorized=True` after a row lock on `pending_approval`. Simulated execution writes `execution_result.simulated=true` and does not send email or change documents.
 
 ```bash
-alembic upgrade head   # head a9b0c1d2e3f4 (users + workflow actors); prior f8a2b3c4d5e6
+alembic upgrade head   # head b0c1d2e3f4a5 (tenants, ACL, audit); prior a9b0c1d2e3f4
 ```
 
 ```bash

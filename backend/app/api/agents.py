@@ -16,7 +16,8 @@ from app.schemas.agent import (
     AgentWorkflowResponse,
 )
 from app.schemas.rag import RagSourceResponse
-from app.services.access import can_read_workflow
+from app.services.access import can_decide_workflow, can_read_workflow
+from app.services.authorization import Principal
 from app.services.agent_workflow import (
     AgentConflictError,
     AgentNotFoundError,
@@ -55,6 +56,7 @@ def run_agent(
             request=payload.request,
             top_k=payload.top_k,
             document_id=payload.document_id,
+            principal=Principal.from_user(user),
             owner_id=user.id,
         )
     except AgentNotFoundError:
@@ -114,7 +116,7 @@ def approve_agent(
     llm: LLMBackend = Depends(get_llm),
 ) -> AgentWorkflowResponse:
     _ = payload
-    return _decide(db, embedder, llm, workflow_id, approve=True, actor_id=user.id)
+    return _decide(db, embedder, llm, workflow_id, approve=True, actor=user)
 
 
 @router.post("/agents/{workflow_id}/reject", response_model=AgentWorkflowResponse)
@@ -127,7 +129,7 @@ def reject_agent(
     llm: LLMBackend = Depends(get_llm),
 ) -> AgentWorkflowResponse:
     _ = payload
-    return _decide(db, embedder, llm, workflow_id, approve=False, actor_id=user.id)
+    return _decide(db, embedder, llm, workflow_id, approve=False, actor=user)
 
 
 def _decide(
@@ -137,13 +139,24 @@ def _decide(
     workflow_id: UUID,
     *,
     approve: bool,
-    actor_id: UUID,
+    actor: User,
 ) -> AgentWorkflowResponse:
     try:
+        workflow = get_agent_workflow(db, workflow_id)
+    except AgentNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow not found")
+    if not can_decide_workflow(actor, workflow):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow not found")
+    principal = Principal.from_user(actor)
+    try:
         if approve:
-            workflow = approve_agent_workflow(db, embedder, llm, workflow_id, actor_id=actor_id)
+            workflow = approve_agent_workflow(
+                db, embedder, llm, workflow_id, actor_id=actor.id, principal=principal
+            )
         else:
-            workflow = reject_agent_workflow(db, embedder, llm, workflow_id, actor_id=actor_id)
+            workflow = reject_agent_workflow(
+                db, embedder, llm, workflow_id, actor_id=actor.id, principal=principal
+            )
     except AgentNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow not found")
     except AgentConflictError as exc:

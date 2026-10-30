@@ -10,7 +10,7 @@ from app.models.workflow import AgentWorkflow
 from app.services.agent_tools import NOT_PROVIDED
 from app.services.embeddings import get_embedder
 from app.services.llm import get_llm
-from tests.auth_helpers import bearer_headers, seed_user
+from tests.auth_helpers import bearer_headers, own_session_documents, seed_tenant, seed_user
 from tests.fake_embeddings import HashEmbedder
 from tests.fake_llm import SequenceLLM
 from tests.test_agents import DRAFT, PLAN_DRAFT, STRICT_VACATION_POLICY, _session_with_policy
@@ -19,6 +19,22 @@ from tests.test_documents import FakeSession, _clear_overrides, _override_db
 client = TestClient(app)
 
 PASSWORD = "correct-horse-battery"
+
+
+def _team(session, *roles: str):
+    tenant = seed_tenant(session)
+    users = []
+    for role in roles:
+        users.append(
+            seed_user(
+                session,
+                role=role,
+                email=f"{role}-{uuid.uuid4().hex[:8]}@example.com",
+                tenant_id=tenant.id,
+            )
+        )
+    own_session_documents(session, users[0])
+    return tenant, users
 
 
 def _override_llm() -> None:
@@ -111,7 +127,7 @@ def test_agent_run_requires_authentication() -> None:
 
 def test_employee_cannot_approve_or_reject() -> None:
     session, _document = _session_with_policy()
-    employee = seed_user(session, role="employee", email="worker@example.com")
+    _tenant, (employee,) = _team(session, "employee")
     _override_llm()
     _override_db(session)
     headers = bearer_headers(employee)
@@ -134,8 +150,7 @@ def test_employee_cannot_approve_or_reject() -> None:
 
 def test_manager_approval_records_actor_and_duplicate_conflicts() -> None:
     session, _document = _session_with_policy()
-    employee = seed_user(session, role="employee", email="owner@example.com")
-    manager = seed_user(session, role="manager", email="boss@example.com")
+    _tenant, (employee, manager) = _team(session, "employee", "manager")
     _override_llm()
     _override_db(session)
     try:
@@ -168,8 +183,7 @@ def test_manager_approval_records_actor_and_duplicate_conflicts() -> None:
 
 def test_admin_can_reject() -> None:
     session, _document = _session_with_policy()
-    employee = seed_user(session, role="employee", email="owner2@example.com")
-    admin = seed_user(session, role="admin", email="admin2@example.com")
+    _tenant, (employee, admin) = _team(session, "employee", "admin")
     _override_llm()
     _override_db(session)
     try:
@@ -193,14 +207,13 @@ def test_admin_can_reject() -> None:
 
 def test_employee_cannot_read_others_or_historical_null_owner_workflows() -> None:
     session, _document = _session_with_policy()
-    owner = seed_user(session, role="employee", email="owner3@example.com")
-    other = seed_user(session, role="employee", email="other@example.com")
-    manager = seed_user(session, role="manager", email="mgr3@example.com")
+    tenant, (owner, other, manager) = _team(session, "employee", "employee", "manager")
     now = datetime.now(timezone.utc)
     historical = AgentWorkflow(
         id=uuid.uuid4(),
         request="Historical leave draft",
         owner_id=None,
+        tenant_id=tenant.id,
         status="pending_approval",
         intent="draft_action",
         created_at=now,
@@ -233,12 +246,13 @@ def test_employee_cannot_read_others_or_historical_null_owner_workflows() -> Non
 
 def test_stale_invalid_approval_still_fails_for_manager() -> None:
     session, document = _session_with_policy(content=STRICT_VACATION_POLICY)
-    manager = seed_user(session, role="manager", email="mgr-stale@example.com")
+    _tenant, (manager,) = _team(session, "manager")
     now = datetime.now(timezone.utc)
     workflow = AgentWorkflow(
         id=uuid.uuid4(),
         request="Review the vacation policy and prepare an approval request for 25 days off.",
         owner_id=manager.id,
+        tenant_id=manager.tenant_id,
         document_id=document.id,
         status="pending_approval",
         intent="draft_action",

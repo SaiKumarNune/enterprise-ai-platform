@@ -12,6 +12,7 @@ from app.core.config import settings
 from app.models.chunk import DocumentChunk
 from app.services.embeddings import EmbeddingBackend
 from app.services.llm import LLMBackend
+from app.services.authorization import Principal
 from app.services.search import search_similar_chunks
 
 logger = logging.getLogger("app.rag")
@@ -101,6 +102,7 @@ def answer_question(
     *,
     question: str,
     top_k: int,
+    principal: Principal,
     document_id: UUID | None = None,
 ) -> RagAnswer:
     started = time.perf_counter()
@@ -112,6 +114,7 @@ def answer_question(
             embedder,
             question=question,
             top_k=top_k,
+            principal=principal,
             document_id=document_id,
         )
         if not selected:
@@ -196,6 +199,7 @@ def retrieve_evidence(
     *,
     question: str,
     top_k: int,
+    principal: Principal,
     document_id: UUID | None = None,
 ) -> tuple[list[tuple[DocumentChunk, float]], list[RagSource], int]:
     query_embedding = embedder.embed_texts([question])[0]
@@ -204,6 +208,7 @@ def retrieve_evidence(
         db,
         query_embedding,
         top_k=candidate_k,
+        principal=principal,
         document_id=document_id,
     )
     selected = select_context(

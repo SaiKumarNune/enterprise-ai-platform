@@ -6,8 +6,10 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.security import hash_password, normalize_email
 from app.models.user import EMPLOYEE, User
+from app.services.legacy_backfill import GREENFIELD_TENANT_ID
 
 
 class DuplicateUserError(Exception):
@@ -22,10 +24,18 @@ def get_user_by_id(db: Session, user_id: UUID) -> User | None:
     return db.get(User, user_id)
 
 
+def _registration_tenant_id() -> UUID:
+    raw = settings.default_tenant_id.strip()
+    if raw:
+        return UUID(raw)
+    return GREENFIELD_TENANT_ID
+
+
 def create_employee(db: Session, *, email: str, password: str) -> User:
     user = User(
         id=uuid4(),
         email=normalize_email(email),
+        tenant_id=_registration_tenant_id(),
         password_hash=hash_password(password),
         role=EMPLOYEE,
         is_active=True,
@@ -49,6 +59,7 @@ def upsert_admin(db: Session, *, email: str, password: str) -> User:
         user = User(
             id=uuid4(),
             email=normalize_email(email),
+            tenant_id=_registration_tenant_id(),
             password_hash=hash_password(password),
             role=ADMIN,
             is_active=True,
