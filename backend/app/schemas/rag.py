@@ -33,3 +33,5 @@ class RagAskResponse(BaseModel):
     retrieval_count: int
     grounded: bool
     model: str
+    citation_valid: bool = True
+    abstained: bool = False

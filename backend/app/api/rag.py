@@ -84,4 +84,6 @@ def ask_rag(
         retrieval_count=result.retrieval_count,
         grounded=result.grounded,
         model=result.model,
+        citation_valid=result.citation_valid,
+        abstained=result.abstained,
     )

@@ -31,6 +31,7 @@ class Settings:
     ollama_timeout_seconds: float
     rag_context_chars: int
     rag_min_similarity: float
+    rag_retrieve_multiplier: int
 
     @property
     def database_url(self) -> str:
@@ -69,6 +70,7 @@ def _load_settings() -> Settings:
         ollama_timeout_seconds=float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "60")),
         rag_context_chars=int(os.getenv("RAG_CONTEXT_CHARS", "6000")),
         rag_min_similarity=float(os.getenv("RAG_MIN_SIMILARITY", "0.2")),
+        rag_retrieve_multiplier=int(os.getenv("RAG_RETRIEVE_MULTIPLIER", "2")),
     )
 
 

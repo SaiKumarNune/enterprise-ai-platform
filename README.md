@@ -83,7 +83,36 @@ ollama serve
 ollama pull llama3.2:3b
 ```
 
-Configure `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_TIMEOUT_SECONDS`, `RAG_CONTEXT_CHARS`, and `RAG_MIN_SIMILARITY` in `.env`.
+Configure `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_TIMEOUT_SECONDS`, `RAG_CONTEXT_CHARS`, `RAG_MIN_SIMILARITY`, and `RAG_RETRIEVE_MULTIPLIER` in `.env`.
+
+`RAG_MIN_SIMILARITY` (default `0.2`) drops weak neighbors before generation. Higher values increase abstention and reduce noisy context; lower values increase recall and can add irrelevant chunks. `RAG_RETRIEVE_MULTIPLIER` fetches extra candidates (capped at 20) then filters, dedupes, and assigns stable `[S1]…` IDs in similarity order. `/search` is unchanged and does not use this threshold.
+
+### RAG architecture
+
+1. Embed the question with MiniLM.
+2. Retrieve extra neighbors from pgvector (same cosine search as `/search`).
+3. Filter by `RAG_MIN_SIMILARITY`, drop near-duplicates (keep longer evidence), apply a character budget.
+4. Generate a short synthesized answer with a local Ollama model. Document text is wrapped as untrusted data.
+5. Parse `[S#]` citations, strip unknown IDs, and flag missing citations on factual answers.
+6. Return `answer`, `sources`, `grounded`, `citation_valid`, and `abstained`.
+
+`grounded` / `citation_valid` are heuristics. They do not prove the answer is factually correct.
+
+### Offline evaluation
+
+```bash
+python eval/run_rag_eval.py
+python eval/run_rag_eval.py --output /tmp/rag_eval.json
+```
+
+Uses synthetic documents in `eval/datasets/rag_quality_v1.json` plus fake embeddings/LLM. It does not write to PostgreSQL or download models. Mock aggregates are not MiniLM or Ollama quality scores.
+
+| Metric | Definition |
+|---|---|
+| Recall@k | Gold chunk IDs found in the top-k retrieved chunks |
+| Citation validity rate | Remaining citations map to retrieved source IDs |
+| Abstention accuracy | Abstention matches `expect_abstain` |
+| Mean latency ms | Mock-runner wall time, not Ollama latency |
 
 ```bash
 curl -X POST http://127.0.0.1:8000/rag/ask \
@@ -91,9 +120,9 @@ curl -X POST http://127.0.0.1:8000/rag/ask \
   -d '{"question": "How many vacation days do employees receive?", "top_k": 5}'
 ```
 
-Response fields: `answer`, `sources` (`source_id`, `document_id`, `chunk_id`, `page_number`, `similarity`), `retrieval_count`, `grounded`, `model`. `similarity` is cosine similarity. The answer cites sources as `[S1]`, `[S2]`. Unsupported citations are stripped; uncited model output is replaced with an insufficient-information message.
+Response fields: `answer`, `sources` (`source_id`, `document_id`, `chunk_id`, `chunk_index`, `page_number`, `similarity`), `retrieval_count`, `grounded`, `citation_valid`, `abstained`, `model`. `similarity` is cosine similarity. The answer cites sources as `[S1]`, `[S2]`. Unknown citation IDs are stripped. Factual answers without citations stay in the response with `grounded=false` and `citation_valid=false`; they are not rewritten into the insufficient-information fallback.
 
-This is not a guarantee of factual correctness. Prompting and citation checks reduce hallucinations; they do not eliminate them. Latency is limited by local embedding + Ollama generation on the request thread (`503` if Ollama is down, `504` on timeout).
+This is not a guarantee of factual correctness. Prompting and citation checks reduce some failure modes; they do not eliminate hallucinations or prove that a cited claim is true. Latency is limited by local embedding + Ollama generation on the request thread (`503` if Ollama is down, `504` on timeout).
 
 ## Run tests
 
