@@ -13,6 +13,7 @@ from app.models.chunk import DocumentChunk
 from app.models.document import Document
 from app.schemas.chunk import DocumentChunkResponse
 from app.schemas.document import DocumentCreate, DocumentResponse, DocumentUpdate
+from app.services.embeddings import EmbeddingBackend, EmbeddingError, get_embedder
 from app.services.extraction import EmptyDocumentError, ExtractionError
 from app.services.ingestion import IngestionConflictError, process_stored_document
 from app.services.storage import (
@@ -150,6 +151,7 @@ def process_document(
     document_id: UUID,
     db: Session = Depends(get_db),
     storage: LocalStorage = Depends(get_storage),
+    embedder: EmbeddingBackend = Depends(get_embedder),
 ) -> Document:
     document = db.get(Document, document_id)
     if document is None:
@@ -159,6 +161,7 @@ def process_document(
             db,
             document,
             storage,
+            embedder,
             chunk_size=settings.chunk_size,
             overlap=settings.chunk_overlap,
         )
@@ -181,6 +184,11 @@ def process_document(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Unable to extract text from document",
+        ) from exc
+    except EmbeddingError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Document processing failed",
         ) from exc
     except HTTPException:
         raise

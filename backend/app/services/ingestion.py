@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from app.models.chunk import DocumentChunk
 from app.models.document import Document
 from app.services.chunking import chunk_text
+from app.services.embeddings import EmbeddingBackend
 from app.services.extraction import (
     EmptyDocumentError,
     ExtractionError,
@@ -22,6 +23,7 @@ def process_stored_document(
     db: Session,
     document: Document,
     storage: LocalStorage,
+    embedder: EmbeddingBackend,
     *,
     chunk_size: int,
     overlap: int,
@@ -52,16 +54,19 @@ def process_stored_document(
         if not pieces:
             raise EmptyDocumentError("Document contains no extractable text")
 
+        embeddings = embedder.embed_texts([piece.content for piece in pieces])
+
         db.execute(
             delete(DocumentChunk).where(DocumentChunk.document_id == document.id)
         )
-        for piece in pieces:
+        for piece, embedding in zip(pieces, embeddings, strict=True):
             db.add(
                 DocumentChunk(
                     document_id=document.id,
                     chunk_index=piece.index,
                     content=piece.content,
                     page_number=piece.page_number,
+                    embedding=embedding,
                 )
             )
         document.status = "ready"

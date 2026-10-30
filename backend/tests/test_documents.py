@@ -7,6 +7,7 @@ from app.core.database import get_db
 from app.main import app
 from app.models.chunk import DocumentChunk
 from app.models.document import Document
+from app.services.search import cosine_similarity
 
 client = TestClient(app)
 
@@ -108,6 +109,24 @@ class FakeSession:
                     item for item in self.chunks if item.document_id != document_id
                 ]
         return statement
+
+    def search_chunks(
+        self,
+        query_embedding: list[float],
+        top_k: int,
+        document_id=None,
+    ) -> list[tuple[DocumentChunk, float]]:
+        rows = [
+            item for item in self.chunks if getattr(item, "embedding", None) is not None
+        ]
+        if document_id is not None:
+            rows = [item for item in rows if item.document_id == document_id]
+        scored = [
+            (item, cosine_similarity(query_embedding, item.embedding))
+            for item in rows
+        ]
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        return scored[:top_k]
 
     def scalars(self, statement):
         self.last_statement = statement

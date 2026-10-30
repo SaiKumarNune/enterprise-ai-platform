@@ -24,6 +24,8 @@ class Settings:
     max_upload_bytes: int
     chunk_size: int
     chunk_overlap: int
+    embedding_model: str
+    embedding_dimensions: int
 
     @property
     def database_url(self) -> str:
@@ -55,6 +57,8 @@ def _load_settings() -> Settings:
         max_upload_bytes=int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024))),
         chunk_size=int(os.getenv("CHUNK_SIZE", "1000")),
         chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "200")),
+        embedding_model=os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2"),
+        embedding_dimensions=int(os.getenv("EMBEDDING_DIMENSIONS", "384")),
     )
 
 

@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import DateTime, ForeignKey, Integer, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -37,5 +38,6 @@ class DocumentChunk(Base):
         nullable=False,
         server_default=func.now(),
     )
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(384), nullable=True)
 
     document: Mapped["Document"] = relationship(back_populates="chunks")

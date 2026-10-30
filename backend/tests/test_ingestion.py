@@ -8,7 +8,9 @@ from fastapi.testclient import TestClient
 from app.core.config import settings
 from app.main import app
 from app.models.chunk import DocumentChunk
+from app.services.embeddings import get_embedder
 from app.services.storage import LocalStorage, get_storage
+from tests.fake_embeddings import FailingEmbedder, HashEmbedder
 from tests.pdf_fixtures import pdf_with_pages
 from tests.test_documents import (
     FakeSession,
@@ -53,6 +55,8 @@ def test_process_txt_document_creates_chunks(tmp_path: Path) -> None:
     assert body[0]["chunk_index"] == 0
     assert body[0]["content"]
     assert session.chunks
+    assert session.chunks[0].embedding is not None
+    assert len(session.chunks[0].embedding) == 384
 
 
 def test_process_pdf_document_sets_page_numbers(
@@ -158,6 +162,36 @@ def test_process_returns_404_when_stored_file_missing(tmp_path: Path) -> None:
     assert response.status_code == 404
     assert response.json() == {"detail": "Stored file not found"}
     assert document.status == "uploaded"
+
+
+def test_process_keeps_old_chunks_when_embedding_fails(tmp_path: Path) -> None:
+    stored_name = f"{uuid.uuid4()}.txt"
+    (tmp_path / stored_name).write_text("new content to embed", encoding="utf-8")
+    document = _sample_document("notes.txt")
+    document.content_type = "text/plain"
+    document.storage_path = stored_name
+    old = DocumentChunk(
+        id=uuid.uuid4(),
+        document_id=document.id,
+        chunk_index=0,
+        content="keep me",
+        page_number=None,
+        created_at=datetime.now(timezone.utc),
+        embedding=HashEmbedder().embed_texts(["keep me"])[0],
+    )
+    session = FakeSession(documents=[document])
+    session.chunks = [old]
+    _override_storage(tmp_path)
+    _override_db(session)
+    app.dependency_overrides[get_embedder] = lambda: FailingEmbedder()
+    try:
+        response = client.post(f"/documents/{document.id}/process")
+    finally:
+        _clear_overrides()
+
+    assert response.status_code == 500
+    assert document.status == "failed"
+    assert session.chunks == [old]
 
 
 def test_process_empty_file_marks_failed(tmp_path: Path) -> None:

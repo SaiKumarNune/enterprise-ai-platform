@@ -11,84 +11,70 @@ python -m pip install -r requirements.txt
 cp .env.example .env
 ```
 
-## Run the API
+`sentence-transformers` may download `all-MiniLM-L6-v2` (384 dimensions) the first time you process a document or search. That uses local CPU and RAM. Tests never load the model.
 
-From the repository root, with PostgreSQL running:
+## Run the API
 
 ```bash
 source .venv/bin/activate
 uvicorn app.main:app --reload --app-dir backend
 ```
 
-Open http://127.0.0.1:8000/health or http://127.0.0.1:8000/docs.
+Open http://127.0.0.1:8000/docs.
 
-## PostgreSQL (local Docker)
+## PostgreSQL with pgvector
+
+Local Compose uses `pgvector/pgvector:pg17` (PostgreSQL 17) so it can reuse the existing `postgres_data` volume. Do **not** run `docker compose down -v` when changing this image.
 
 ```bash
 docker compose up -d db
-docker compose exec db pg_isready -U enterprise_user -d enterprise_ai
-docker compose down        # keep volume
-docker compose down -v     # wipe database data
+docker compose exec db psql -U enterprise_user -d enterprise_ai -c "CREATE EXTENSION IF NOT EXISTS vector;"
 ```
 
-Postgres is bound to `127.0.0.1:5432`.
-
-## Database migrations (Alembic)
+## Database migrations
 
 ```bash
 alembic current
 alembic upgrade head
-alembic revision --autogenerate -m "describe the change"
 ```
 
-## Document API
+## Document and search API
 
 | Method | Path | Notes |
 |---|---|---|
 | `POST` | `/documents` | Metadata-only create |
-| `GET` | `/documents` | List; `skip` default 0, `limit` default 20, max 100 |
-| `GET` | `/documents/{document_id}` | Fetch one document |
-| `PATCH` | `/documents/{document_id}` | `filename` and `content_type` only |
-| `DELETE` | `/documents/{document_id}` | Delete metadata, chunks (cascade), and best-effort file cleanup |
-| `POST` | `/documents/upload` | Multipart PDF or UTF-8 text upload |
-| `GET` | `/documents/{document_id}/download` | Download stored file |
-| `POST` | `/documents/{document_id}/process` | Extract text, chunk, persist chunks |
-| `GET` | `/documents/{document_id}/chunks` | List chunks; `skip`/`limit`, ordered by `chunk_index` |
+| `GET` | `/documents` | List with `skip`/`limit` |
+| `GET` | `/documents/{id}` | Fetch one document |
+| `PATCH` | `/documents/{id}` | `filename` and `content_type` only |
+| `DELETE` | `/documents/{id}` | Metadata, chunks, best-effort file cleanup |
+| `POST` | `/documents/upload` | PDF or UTF-8 text |
+| `GET` | `/documents/{id}/download` | Download stored file |
+| `POST` | `/documents/{id}/process` | Extract, chunk, embed, persist |
+| `GET` | `/documents/{id}/chunks` | Ordered chunk list |
+| `POST` | `/search` | Semantic search over chunk embeddings |
 
-Uploads: PDF and UTF-8 text only, 10 MB max. Files live in `UPLOAD_DIR` (default `uploads/`, gitignored) under a server-generated UUID name.
+`POST /documents/{id}/process` is synchronous. It extracts text, chunks it, embeds all new chunks, then replaces previous chunks in one commit. If embedding fails, old chunks are left unchanged and status becomes `failed`.
 
-### Ingestion
+`PATCH` cannot change `status`.
 
-`POST /documents/{id}/process` is **synchronous**. It reads the stored file, extracts text with pypdf (PDF) or UTF-8 decode (TXT), splits into overlapping chunks (default 1000 characters, 200 overlap; `CHUNK_SIZE` / `CHUNK_OVERLAP`), and replaces any previous chunks in one database transaction.
+### Semantic search
 
-Status flow:
+`POST /search` embeds the query with the same model and ranks `document_chunks` by pgvector **cosine distance**. The JSON `similarity` field is **cosine similarity** (`1 - cosine_distance`) for L2-normalized 384-d vectors. Chunks without embeddings are excluded.
 
-- `uploaded` or `failed` or `ready` → `processing` → `ready` (success) or `failed` (error)
-- `processing` cannot be started again (`409`) until it finishes
-- metadata-only documents (`storage_path` empty) return `409`
-- missing stored files return `404`
-- empty/unreadable files return `422` and set `failed` without deleting existing chunks
-
-Reprocessing a `ready` document deletes old chunks and inserts the new set in the same commit. If that commit fails, the previous chunks remain.
-
-`PATCH` cannot change `status`. Processing state is owned by `/process` so clients cannot mark a document `ready` without chunks or `processing` without a job.
-
-Scanned/image-only PDFs have no extractable text and need OCR, which is not implemented in this phase.
-
-### Examples
+No ANN index (HNSW/IVFFlat) is created yet. Exact nearest-neighbor search is enough for local development volumes.
 
 ```bash
-curl -X POST http://127.0.0.1:8000/documents/upload -F "file=@./handbook.pdf"
-curl -X POST http://127.0.0.1:8000/documents/<document-id>/process
-curl "http://127.0.0.1:8000/documents/<document-id>/chunks?skip=0&limit=20"
-curl -O -J http://127.0.0.1:8000/documents/<document-id>/download
+curl -X POST http://127.0.0.1:8000/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "vacation policy", "top_k": 5}'
 ```
+
+Optional `document_id` limits results to one document (`404` if that document does not exist). `top_k` is 1–50 (default 5).
 
 ## Run tests
 
 ```bash
-source .venv/bin/activate
 pytest
 ```
 
-Tests use an in-memory fake session and temporary directories. They do not write to the development PostgreSQL database.
+Tests use a fake embedder, an in-memory session, and temporary directories. They do not use development PostgreSQL and they do not download the MiniLM model.
