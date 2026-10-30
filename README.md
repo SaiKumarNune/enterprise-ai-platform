@@ -13,6 +13,8 @@ cp .env.example .env
 
 `sentence-transformers` may download `all-MiniLM-L6-v2` (384 dimensions) the first time you process a document or search. That uses local CPU and RAM. Tests never load the model.
 
+Set `JWT_SECRET` in `.env` to a unique value of at least 32 characters. The API refuses to issue or verify tokens if the secret is missing, shorter than 32 characters, or equal to the `.env.example` placeholder. Do not reuse the placeholder.
+
 ## Run the API
 
 ```bash
@@ -36,6 +38,75 @@ docker compose exec db psql -U enterprise_user -d enterprise_ai -c "CREATE EXTEN
 ```bash
 alembic current
 alembic upgrade head
+```
+
+Phase 9 revision `a9b0c1d2e3f4` (users + workflow owner/decision actor) revises `f8a2b3c4d5e6`. Additive only; it does not drop tables or reset volumes.
+
+## Authentication and RBAC
+
+Roles are `employee`, `manager`, and `admin`. Self-registration always creates an **employee**. Privileged roles cannot be set through public HTTP APIs. Authorization reloads the user from the database on every request; JWT claims are not trusted for role checks.
+
+| Method | Path | Who |
+|---|---|---|
+| `POST` | `/auth/register` | Public. Creates an employee. |
+| `POST` | `/auth/login` | Public. JSON `{email, password}` returns a bearer access token. |
+| `POST` | `/auth/token` | Public. OAuth2 password form (`username` = email) for Swagger Authorize. |
+| `GET` | `/auth/me` | Authenticated user. |
+| `POST` | `/agents/run` | Any active user. New workflows are owned by the caller. |
+| `GET` | `/agents/{workflow_id}` | Owner, or manager/admin. Employees cannot read others' workflows. Historical rows with `owner_id=null` are readable by manager/admin only. |
+| `POST` | `/agents/{id}/approve` | Manager or admin. |
+| `POST` | `/agents/{id}/reject` | Manager or admin. |
+
+`/health`, `/db-health`, `/documents`, `/search`, and `/rag/ask` remain **unauthenticated** in this phase.
+
+### Development-only admin bootstrap
+
+There is no public role-upgrade endpoint. Promote a local admin from the project root after migrations:
+
+```bash
+BOOTSTRAP_ADMIN_ENABLED=true \
+BOOTSTRAP_ADMIN_EMAIL=admin@localhost \
+BOOTSTRAP_ADMIN_PASSWORD='choose-a-long-local-password' \
+PYTHONPATH=backend python -m app.bootstrap_admin
+```
+
+Unset those variables afterward. This is not an HR identity provider.
+
+### Swagger testing sequence
+
+1. Copy `.env.example` to `.env` if needed, set a unique `JWT_SECRET`, run `alembic upgrade head`, start Postgres and `uvicorn`.
+2. Open http://127.0.0.1:8000/docs.
+3. `POST /auth/register`:
+
+```json
+{"email": "employee@example.com", "password": "correct-horse-battery"}
+```
+
+4. `POST /auth/login` with the same JSON. Copy `access_token`.
+5. Click **Authorize**, paste the token (or use `/auth/token` with username `employee@example.com` and the password).
+6. `GET /auth/me` — role is `employee`.
+7. `POST /agents/run`:
+
+```json
+{"request": "Review the vacation policy and prepare an approval request for three days off.", "top_k": 5}
+```
+
+8. `GET /agents/{workflow_id}` as the employee.
+9. `POST /agents/{workflow_id}/approve` as the employee — expect **403**.
+10. Bootstrap a manager/admin with the CLI above (or a second user whose role was set only via bootstrap). Login as that user, Authorize with the new token.
+11. `POST /agents/{workflow_id}/approve` — manager/admin only. A second approve returns **409**. Stale invalid pending drafts return `needs_clarification` and are not executed.
+
+Sample login:
+
+```bash
+curl -X POST http://127.0.0.1:8000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "employee@example.com", "password": "correct-horse-battery"}'
+
+curl -X POST http://127.0.0.1:8000/agents/run \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"request": "How many vacation days do full-time employees receive?", "top_k": 5}'
 ```
 
 ## Document and search API
@@ -126,7 +197,7 @@ This is not a guarantee of factual correctness. Prompting and citation checks re
 
 ## Agent workflows (development only)
 
-`POST /agents/run` starts a **synchronous** LangGraph graph with four distinct agents. These endpoints are **unauthenticated and DEVELOPMENT-ONLY**. Do not expose them as an organizational approval system.
+`POST /agents/run` starts a **synchronous** LangGraph graph with four distinct agents. Agent endpoints require a JWT. Simulated execution is **not** an HR system integration and must not be treated as a production approval system.
 
 | Agent | Responsibility |
 |---|---|
@@ -154,20 +225,23 @@ LangGraph is in-process orchestration only. PostgreSQL `agent_workflows` (includ
 Allowlisted tools: `knowledge_search`, `prepare_approval_request`, `execute_approved_action`. Only `POST /agents/{id}/approve` sets `authorized=True` after a row lock on `pending_approval`. Simulated execution writes `execution_result.simulated=true` and does not send email or change documents.
 
 ```bash
-alembic upgrade head   # head f8a2b3c4d5e6 (agent_trace); prior e7a1b0c2d3f4
+alembic upgrade head   # head a9b0c1d2e3f4 (users + workflow actors); prior f8a2b3c4d5e6
 ```
 
 ```bash
 curl -X POST http://127.0.0.1:8000/agents/run \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"request": "Review the vacation policy and prepare an approval request for three days off.", "top_k": 5}'
 
-curl http://127.0.0.1:8000/agents/$WORKFLOW_ID
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/agents/$WORKFLOW_ID
 
 curl -X POST http://127.0.0.1:8000/agents/$WORKFLOW_ID/approve \
+  -H "Authorization: Bearer $MANAGER_TOKEN" \
   -H "Content-Type: application/json" -d '{}'
 
 curl -X POST http://127.0.0.1:8000/agents/$WORKFLOW_ID/reject \
+  -H "Authorization: Bearer $MANAGER_TOKEN" \
   -H "Content-Type: application/json" -d '{}'
 ```
 
@@ -189,4 +263,4 @@ Example pending response (abridged): `status=pending_approval` only after the va
 pytest
 ```
 
-Tests use a fake embedder, an in-memory session, and temporary directories. They do not use development PostgreSQL and they do not download the MiniLM model.
+Tests use a fake embedder, an in-memory session, and temporary directories. They do not use development PostgreSQL and they do not download the MiniLM model. Agent tests authenticate with JWT secrets set only in the pytest process.

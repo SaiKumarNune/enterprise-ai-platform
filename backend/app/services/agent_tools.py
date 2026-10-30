@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import calendar
 import json
 import re
+from datetime import date
 from typing import Any
 from uuid import UUID
 
@@ -44,9 +46,57 @@ WORD_DAYS = {
 }
 JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 ISO_DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
-BECAUSE_RE = re.compile(
-    r"\bbecause\s+(.+?)(?=\s+from\s+\d{4}-\d{2}-\d{2}|\s+starting\b|\s+on\s+\d{4}-\d{2}-\d{2}|$)",
+_MONTH_NAMES = "|".join(
+    name for name in list(calendar.month_name) + list(calendar.month_abbr) if name
+)
+_MONTH_LOOKUP = {
+    name.lower(): index
+    for index, name in enumerate(calendar.month_name)
+    if name
+}
+_MONTH_LOOKUP.update(
+    {name.lower(): index for index, name in enumerate(calendar.month_abbr) if name}
+)
+DATE_TOKEN_RE = (
+    rf"(?:\d{{4}}-\d{{2}}-\d{{2}}|"
+    rf"(?:{_MONTH_NAMES})\s+\d{{1,2}}(?:st|nd|rd|th)?(?:(?:,|\s)+\d{{4}})?)"
+)
+ISO_OR_NATURAL_DATE_RE = re.compile(rf"({DATE_TOKEN_RE})", re.IGNORECASE)
+FROM_TO_DATES_RE = re.compile(
+    rf"\bfrom\s+({DATE_TOKEN_RE})\s+to\s+({DATE_TOKEN_RE})\b",
+    re.IGNORECASE,
+)
+START_DATE_LABEL_RE = re.compile(
+    rf"\b(?:the\s+)?start(?:ing)?\s+date\s*(?:is|:)\s*({DATE_TOKEN_RE})\b",
+    re.IGNORECASE,
+)
+END_DATE_LABEL_RE = re.compile(
+    rf"\b(?:the\s+)?end(?:ing)?\s+date\s*(?:is|:)\s*({DATE_TOKEN_RE})\b",
+    re.IGNORECASE,
+)
+REASON_STOP = (
+    rf"(?=\s*(?:[.;](?:\s|$)|$|"
+    rf"the\s+start(?:ing)?\s+date|the\s+end(?:ing)?\s+date|"
+    rf"\bstart(?:ing)?\s+date\b|\bend(?:ing)?\s+date\b|"
+    rf"\bfrom\s+(?:\d{{4}}-\d{{2}}-\d{{2}}|(?:{_MONTH_NAMES})\b)|"
+    rf"\bstarting\b|\bon\s+\d{{4}}-\d{{2}}-\d{{2}}))"
+)
+LABELED_REASON_RE = re.compile(
+    rf"\b(?:my\s+reason\s+is|the\s+reason\s+is|reason\s+is|reason\s*:)\s+(.+?){REASON_STOP}",
     re.IGNORECASE | re.DOTALL,
+)
+BECAUSE_REASON_RE = re.compile(
+    rf"\bbecause(?:\s+of)?\s+(.+?){REASON_STOP}",
+    re.IGNORECASE | re.DOTALL,
+)
+FOR_REASON_RE = re.compile(
+    rf"\bfor\s+(?!the\b)(?!(?:{_MONTH_NAMES})\b)(.+?){REASON_STOP}",
+    re.IGNORECASE | re.DOTALL,
+)
+REASON_BOILERPLATE_RE = re.compile(
+    r"^(?:an?\s+)?(?:approval request|leave request|vacation request|leave|vacation|time off)"
+    r"(?:\s+for\s+.*)?$",
+    re.IGNORECASE,
 )
 NOT_PROVIDED = "Not provided"
 
@@ -235,19 +285,112 @@ def _fallback_plan(request: str, *, reason: str) -> dict[str, Any]:
 
 
 def extract_user_leave_details(request: str) -> dict[str, Any]:
-    because = BECAUSE_RE.search(request)
-    reason = None
-    if because:
-        reason = " ".join(because.group(1).split()).strip(" .,")
-        if not reason or (DAYS_RE.search(reason) and len(reason.split()) <= 5):
-            reason = None
-    dates = ISO_DATE_RE.findall(request)
+    start_date, end_date = _extract_leave_dates(request)
     return {
         "days": parse_leave_days(request),
-        "reason": reason,
-        "start_date": dates[0] if dates else None,
-        "end_date": dates[1] if len(dates) > 1 else None,
+        "reason": _extract_leave_reason(request),
+        "start_date": start_date,
+        "end_date": end_date,
     }
+
+
+def _extract_leave_reason(request: str) -> str | None:
+    for pattern in (LABELED_REASON_RE, BECAUSE_REASON_RE, FOR_REASON_RE):
+        match = pattern.search(request)
+        if match is None:
+            continue
+        reason = _normalize_reason(match.group(1))
+        if reason:
+            return reason
+    return None
+
+
+def _normalize_reason(raw: str) -> str | None:
+    reason = " ".join(raw.split()).strip(" .,;:")
+    if reason.lower().startswith("of "):
+        reason = reason[3:].strip(" .,;:")
+    if not reason:
+        return None
+    if REASON_BOILERPLATE_RE.fullmatch(reason):
+        return None
+    if DAYS_RE.search(reason) and len(reason.split()) <= 8:
+        return None
+    if ISO_OR_NATURAL_DATE_RE.search(reason) and len(reason.split()) <= 8:
+        return None
+    return reason
+
+
+def _extract_leave_dates(request: str) -> tuple[str | None, str | None]:
+    labeled_start = _parse_date_token(_group(START_DATE_LABEL_RE.search(request), 1))
+    labeled_end = _parse_date_token(_group(END_DATE_LABEL_RE.search(request), 1))
+    range_match = FROM_TO_DATES_RE.search(request)
+    range_start = range_end = None
+    if range_match:
+        range_start, range_end = _parse_date_pair(range_match.group(1), range_match.group(2))
+    start_date = labeled_start or range_start
+    end_date = labeled_end or range_end
+    if start_date and end_date:
+        return start_date, end_date
+    unlabeled: list[str] = []
+    for match in ISO_OR_NATURAL_DATE_RE.finditer(request):
+        parsed = _parse_date_token(match.group(1))
+        if parsed and parsed not in unlabeled:
+            unlabeled.append(parsed)
+    if start_date is None and unlabeled:
+        start_date = unlabeled[0]
+    if end_date is None and len(unlabeled) > 1:
+        end_date = unlabeled[1]
+    return start_date, end_date
+
+
+def _parse_date_pair(first: str, second: str) -> tuple[str | None, str | None]:
+    first_year = _date_year(first)
+    second_year = _date_year(second)
+    shared_year = second_year or first_year
+    return (
+        _parse_date_token(first, default_year=shared_year),
+        _parse_date_token(second, default_year=shared_year),
+    )
+
+
+def _date_year(token: str) -> int | None:
+    iso = ISO_DATE_RE.search(token)
+    if iso:
+        return int(iso.group(1)[:4])
+    year = re.search(r"\b(\d{4})\b", token)
+    return int(year.group(1)) if year else None
+
+
+def _parse_date_token(token: str | None, default_year: int | None = None) -> str | None:
+    if not token:
+        return None
+    text = " ".join(token.split()).strip(" .,")
+    iso = ISO_DATE_RE.fullmatch(text)
+    if iso:
+        try:
+            return date.fromisoformat(iso.group(1)).isoformat()
+        except ValueError:
+            return None
+    natural = re.fullmatch(
+        rf"({_MONTH_NAMES})\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:(?:,|\s)+(\d{{4}}))?",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if natural is None:
+        return None
+    month = _MONTH_LOOKUP.get(natural.group(1).lower())
+    day = int(natural.group(2))
+    year = int(natural.group(3)) if natural.group(3) else default_year
+    if month is None or year is None:
+        return None
+    try:
+        return date(year, month, day).isoformat()
+    except ValueError:
+        return None
+
+
+def _group(match: re.Match[str] | None, index: int) -> str | None:
+    return match.group(index) if match else None
 
 
 def parse_leave_days(request: str) -> int | None:

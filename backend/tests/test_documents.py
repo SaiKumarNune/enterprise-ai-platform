@@ -8,6 +8,7 @@ from app.core.database import get_db
 from app.main import app
 from app.models.chunk import DocumentChunk
 from app.models.document import Document
+from app.models.user import User
 from app.models.workflow import AgentWorkflow
 from app.services.search import cosine_similarity
 
@@ -34,6 +35,7 @@ class FakeSession:
         self.documents = list(documents or [])
         self.chunks: list[DocumentChunk] = []
         self.workflows: list[AgentWorkflow] = []
+        self.users: list[User] = []
         self.added: list[object] = []
         self.deleted: list[object] = []
         self.commit_called = False
@@ -46,6 +48,19 @@ class FakeSession:
 
     def add(self, obj: object) -> None:
         now = datetime.now(timezone.utc)
+        if isinstance(obj, User):
+            if obj.id is None:
+                obj.id = uuid.uuid4()
+            if obj.created_at is None:
+                obj.created_at = now
+            if obj.updated_at is None:
+                obj.updated_at = now
+            if obj.is_active is None:
+                obj.is_active = True
+            self.added.append(obj)
+            if obj not in self.users:
+                self.users.append(obj)
+            return
         if isinstance(obj, AgentWorkflow):
             if obj.id is None:
                 obj.id = uuid.uuid4()
@@ -110,6 +125,8 @@ class FakeSession:
             rows = self.chunks
         elif model is AgentWorkflow:
             rows = self.workflows
+        elif model is User:
+            rows = self.users
         else:
             rows = self.documents
         for item in rows:
@@ -143,6 +160,36 @@ class FakeSession:
                     item for item in self.chunks if item.document_id != document_id
                 ]
         return statement
+
+    def scalar(self, statement):
+        self.last_statement = statement
+        entity = statement.column_descriptions[0]["entity"]
+        params = statement.compile().params
+        if entity is User:
+            email = next(
+                (value for value in params.values() if isinstance(value, str)),
+                None,
+            )
+            user_id = next(
+                (value for value in params.values() if isinstance(value, uuid.UUID)),
+                None,
+            )
+            for item in self.users:
+                if email is not None and item.email == email:
+                    return item
+                if user_id is not None and item.id == user_id:
+                    return item
+            return None
+        if entity is AgentWorkflow:
+            workflow_id = next(
+                (value for value in params.values() if isinstance(value, uuid.UUID)),
+                None,
+            )
+            for item in self.workflows:
+                if workflow_id is not None and item.id == workflow_id:
+                    return item
+            return None
+        return None
 
     def search_chunks(
         self,

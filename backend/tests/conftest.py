@@ -1,3 +1,7 @@
+import os
+
+os.environ["JWT_SECRET"] = "pytest-only-jwt-secret-key-not-for-prod"
+
 import pytest
 
 from app.main import app

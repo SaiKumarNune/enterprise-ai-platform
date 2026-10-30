@@ -44,6 +44,7 @@ class AgentDecisionRequest(BaseModel):
 class AgentWorkflowResponse(BaseModel):
     workflow_id: UUID
     request: str
+    owner_id: UUID | None = None
     document_id: UUID | None
     status: str
     intent: str | None
@@ -55,6 +56,7 @@ class AgentWorkflowResponse(BaseModel):
     citation_valid: bool | None
     abstained: bool | None
     approval_decision: str | None
+    decided_by_user_id: UUID | None = None
     execution_result: dict[str, Any] | None
     model: str
     created_at: datetime

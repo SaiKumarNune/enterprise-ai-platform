@@ -33,6 +33,7 @@ def run_agent_workflow(
     request: str,
     top_k: int,
     document_id: UUID | None,
+    owner_id: UUID | None = None,
 ) -> AgentWorkflow:
     if document_id is not None and db.get(Document, document_id) is None:
         raise AgentNotFoundError("document")
@@ -40,6 +41,7 @@ def run_agent_workflow(
     workflow = AgentWorkflow(
         id=uuid4(),
         request=request,
+        owner_id=owner_id,
         document_id=document_id,
         top_k=top_k,
         status="running",
@@ -88,6 +90,8 @@ def approve_agent_workflow(
     embedder: EmbeddingBackend,
     llm: LLMBackend,
     workflow_id: UUID,
+    *,
+    actor_id: UUID | None = None,
 ) -> AgentWorkflow:
     workflow = _claim_pending(db, workflow_id, decision="approved")
     state = _state_from_workflow(workflow)
@@ -129,6 +133,7 @@ def approve_agent_workflow(
     now = datetime.now(timezone.utc)
     _apply_state(workflow, next_state)
     workflow.approval_decision = "approved"
+    workflow.decided_by_user_id = actor_id
     workflow.decided_at = workflow.decided_at or now
     if workflow.execution_result:
         workflow.executed_at = workflow.executed_at or now
@@ -143,6 +148,8 @@ def reject_agent_workflow(
     embedder: EmbeddingBackend,
     llm: LLMBackend,
     workflow_id: UUID,
+    *,
+    actor_id: UUID | None = None,
 ) -> AgentWorkflow:
     workflow = _claim_pending(db, workflow_id, decision="rejected")
     state = _state_from_workflow(workflow)
@@ -158,6 +165,7 @@ def reject_agent_workflow(
     _apply_state(workflow, next_state)
     workflow.status = "rejected"
     workflow.approval_decision = "rejected"
+    workflow.decided_by_user_id = actor_id
     workflow.execution_result = None
     workflow.decided_at = now
     workflow.updated_at = now

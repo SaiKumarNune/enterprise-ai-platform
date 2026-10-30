@@ -33,6 +33,9 @@ class Settings:
     rag_min_similarity: float
     rag_retrieve_multiplier: int
     agent_max_steps: int
+    jwt_secret: str = field(repr=False)
+    jwt_algorithm: str
+    jwt_expire_minutes: int
 
     @property
     def database_url(self) -> str:
@@ -73,6 +76,9 @@ def _load_settings() -> Settings:
         rag_min_similarity=float(os.getenv("RAG_MIN_SIMILARITY", "0.2")),
         rag_retrieve_multiplier=int(os.getenv("RAG_RETRIEVE_MULTIPLIER", "2")),
         agent_max_steps=int(os.getenv("AGENT_MAX_STEPS", "8")),
+        jwt_secret=os.getenv("JWT_SECRET", ""),
+        jwt_algorithm=os.getenv("JWT_ALGORITHM", "HS256"),
+        jwt_expire_minutes=int(os.getenv("JWT_EXPIRE_MINUTES", "60")),
     )
 
 

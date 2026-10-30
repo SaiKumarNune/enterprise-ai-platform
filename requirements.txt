@@ -11,3 +11,5 @@ pypdf==6.21.4
 pgvector==0.4.1
 sentence-transformers==5.1.2
 langgraph==1.2.18
+argon2-cffi==25.1.0
+PyJWT==2.10.1

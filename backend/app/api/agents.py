@@ -1,10 +1,13 @@
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.api.deps import get_current_user, require_roles
 from app.core.config import settings
 from app.core.database import get_db
+from app.models.user import ADMIN, MANAGER, User
 from app.models.workflow import AgentWorkflow
 from app.schemas.agent import (
     AgentDecisionRequest,
@@ -13,6 +16,7 @@ from app.schemas.agent import (
     AgentWorkflowResponse,
 )
 from app.schemas.rag import RagSourceResponse
+from app.services.access import can_read_workflow
 from app.services.agent_workflow import (
     AgentConflictError,
     AgentNotFoundError,
@@ -31,11 +35,14 @@ from app.services.llm import (
 )
 
 router = APIRouter()
+CurrentUser = Annotated[User, Depends(get_current_user)]
+Approver = Annotated[User, Depends(require_roles(MANAGER, ADMIN))]
 
 
 @router.post("/agents/run", response_model=AgentWorkflowResponse)
 def run_agent(
     payload: AgentRunRequest,
+    user: CurrentUser,
     db: Session = Depends(get_db),
     embedder: EmbeddingBackend = Depends(get_embedder),
     llm: LLMBackend = Depends(get_llm),
@@ -48,6 +55,7 @@ def run_agent(
             request=payload.request,
             top_k=payload.top_k,
             document_id=payload.document_id,
+            owner_id=user.id,
         )
     except AgentNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
@@ -84,11 +92,14 @@ def run_agent(
 @router.get("/agents/{workflow_id}", response_model=AgentWorkflowResponse)
 def inspect_agent(
     workflow_id: UUID,
+    user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> AgentWorkflowResponse:
     try:
         workflow = get_agent_workflow(db, workflow_id)
     except AgentNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow not found")
+    if not can_read_workflow(user, workflow):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow not found")
     return _to_response(workflow)
 
@@ -96,25 +107,27 @@ def inspect_agent(
 @router.post("/agents/{workflow_id}/approve", response_model=AgentWorkflowResponse)
 def approve_agent(
     workflow_id: UUID,
+    user: Approver,
     payload: AgentDecisionRequest | None = None,
     db: Session = Depends(get_db),
     embedder: EmbeddingBackend = Depends(get_embedder),
     llm: LLMBackend = Depends(get_llm),
 ) -> AgentWorkflowResponse:
     _ = payload
-    return _decide(db, embedder, llm, workflow_id, approve=True)
+    return _decide(db, embedder, llm, workflow_id, approve=True, actor_id=user.id)
 
 
 @router.post("/agents/{workflow_id}/reject", response_model=AgentWorkflowResponse)
 def reject_agent(
     workflow_id: UUID,
+    user: Approver,
     payload: AgentDecisionRequest | None = None,
     db: Session = Depends(get_db),
     embedder: EmbeddingBackend = Depends(get_embedder),
     llm: LLMBackend = Depends(get_llm),
 ) -> AgentWorkflowResponse:
     _ = payload
-    return _decide(db, embedder, llm, workflow_id, approve=False)
+    return _decide(db, embedder, llm, workflow_id, approve=False, actor_id=user.id)
 
 
 def _decide(
@@ -124,12 +137,13 @@ def _decide(
     workflow_id: UUID,
     *,
     approve: bool,
+    actor_id: UUID,
 ) -> AgentWorkflowResponse:
     try:
         if approve:
-            workflow = approve_agent_workflow(db, embedder, llm, workflow_id)
+            workflow = approve_agent_workflow(db, embedder, llm, workflow_id, actor_id=actor_id)
         else:
-            workflow = reject_agent_workflow(db, embedder, llm, workflow_id)
+            workflow = reject_agent_workflow(db, embedder, llm, workflow_id, actor_id=actor_id)
     except AgentNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow not found")
     except AgentConflictError as exc:
@@ -168,6 +182,7 @@ def _to_response(workflow: AgentWorkflow) -> AgentWorkflowResponse:
     return AgentWorkflowResponse(
         workflow_id=workflow.id,
         request=workflow.request,
+        owner_id=workflow.owner_id,
         document_id=workflow.document_id,
         status=workflow.status,
         intent=workflow.intent,
@@ -179,6 +194,7 @@ def _to_response(workflow: AgentWorkflow) -> AgentWorkflowResponse:
         citation_valid=workflow.citation_valid,
         abstained=workflow.abstained,
         approval_decision=workflow.approval_decision,
+        decided_by_user_id=workflow.decided_by_user_id,
         execution_result=workflow.execution_result,
         model=settings.ollama_model,
         created_at=workflow.created_at,

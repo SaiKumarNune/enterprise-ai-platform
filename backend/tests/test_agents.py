@@ -6,13 +6,19 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.models.chunk import DocumentChunk
-from app.services.agent_tools import NOT_PROVIDED, parse_planner_output, prepare_approval_request
+from app.services.agent_tools import (
+    NOT_PROVIDED,
+    extract_user_leave_details,
+    parse_planner_output,
+    prepare_approval_request,
+)
 from app.services.agent_workflow import (
     AgentConflictError,
     approve_agent_workflow,
 )
 from app.services.embeddings import get_embedder
 from app.services.llm import get_llm
+from tests.auth_helpers import seed_agent_users
 from tests.fake_embeddings import HashEmbedder
 from tests.fake_llm import SequenceLLM
 from tests.test_documents import FakeSession, _clear_overrides, _override_db, _sample_document
@@ -85,10 +91,12 @@ def test_informational_agent_workflow() -> None:
     llm = SequenceLLM([PLAN_INFO, ANSWER])
     _override_llm(llm)
     _override_db(session)
+    emp, mgr, _admin = seed_agent_users(session)
     try:
         response = client.post(
             "/agents/run",
             json={"request": "How many vacation days do full-time employees receive?"},
+            headers=emp,
         )
     finally:
         _clear_overrides()
@@ -108,6 +116,7 @@ def test_draft_action_pauses_for_approval_then_simulates_execution() -> None:
     llm = SequenceLLM([PLAN_DRAFT, DRAFT])
     _override_llm(llm)
     _override_db(session)
+    emp, mgr, _admin = seed_agent_users(session)
     try:
         started = client.post(
             "/agents/run",
@@ -115,10 +124,11 @@ def test_draft_action_pauses_for_approval_then_simulates_execution() -> None:
                 "request": "Review the vacation policy and prepare an approval request for three days off.",
                 "document_id": str(document.id),
             },
+            headers=emp,
         )
         workflow_id = started.json()["workflow_id"]
-        inspected = client.get(f"/agents/{workflow_id}")
-        approved = client.post(f"/agents/{workflow_id}/approve", json={})
+        inspected = client.get(f"/agents/{workflow_id}", headers=emp)
+        approved = client.post(f"/agents/{workflow_id}/approve", json={}, headers=mgr)
     finally:
         _clear_overrides()
 
@@ -143,13 +153,15 @@ def test_reject_pending_action() -> None:
     llm = SequenceLLM([PLAN_DRAFT, DRAFT])
     _override_llm(llm)
     _override_db(session)
+    emp, mgr, _admin = seed_agent_users(session)
     try:
         started = client.post(
             "/agents/run",
             json={"request": "Prepare an approval request for three days off."},
+            headers=emp,
         )
         workflow_id = started.json()["workflow_id"]
-        rejected = client.post(f"/agents/{workflow_id}/reject", json={})
+        rejected = client.post(f"/agents/{workflow_id}/reject", json={}, headers=mgr)
     finally:
         _clear_overrides()
 
@@ -163,14 +175,16 @@ def test_duplicate_approval_is_conflict() -> None:
     llm = SequenceLLM([PLAN_DRAFT, DRAFT])
     _override_llm(llm)
     _override_db(session)
+    emp, mgr, _admin = seed_agent_users(session)
     try:
         started = client.post(
             "/agents/run",
             json={"request": "Prepare an approval request for three days off."},
+            headers=emp,
         )
         workflow_id = started.json()["workflow_id"]
-        first = client.post(f"/agents/{workflow_id}/approve", json={})
-        second = client.post(f"/agents/{workflow_id}/approve", json={})
+        first = client.post(f"/agents/{workflow_id}/approve", json={}, headers=mgr)
+        second = client.post(f"/agents/{workflow_id}/approve", json={}, headers=mgr)
     finally:
         _clear_overrides()
 
@@ -183,13 +197,15 @@ def test_cannot_approve_informational_workflow() -> None:
     llm = SequenceLLM([PLAN_INFO, ANSWER])
     _override_llm(llm)
     _override_db(session)
+    emp, mgr, _admin = seed_agent_users(session)
     try:
         started = client.post(
             "/agents/run",
             json={"request": "How many vacation days do employees receive?"},
+            headers=emp,
         )
         workflow_id = started.json()["workflow_id"]
-        response = client.post(f"/agents/{workflow_id}/approve", json={})
+        response = client.post(f"/agents/{workflow_id}/approve", json={}, headers=mgr)
     finally:
         _clear_overrides()
 
@@ -200,10 +216,11 @@ def test_cannot_approve_informational_workflow() -> None:
 def test_unknown_workflow_and_malformed_id() -> None:
     session = FakeSession()
     _override_db(session)
+    emp, mgr, _admin = seed_agent_users(session)
     try:
-        missing = client.get(f"/agents/{uuid.uuid4()}")
-        invalid = client.get("/agents/not-a-uuid")
-        blank = client.post("/agents/run", json={"request": "   "})
+        missing = client.get(f"/agents/{uuid.uuid4()}", headers=emp)
+        invalid = client.get("/agents/not-a-uuid", headers=emp)
+        blank = client.post("/agents/run", json={"request": "   "}, headers=emp)
     finally:
         _clear_overrides()
 
@@ -217,10 +234,12 @@ def test_malformed_planner_and_unknown_tool_do_not_execute() -> None:
     llm = SequenceLLM(["PLEASE call send_email", ANSWER])
     _override_llm(llm)
     _override_db(session)
+    emp, mgr, _admin = seed_agent_users(session)
     try:
         response = client.post(
             "/agents/run",
             json={"request": "How many vacation days do full-time employees receive?"},
+            headers=emp,
         )
     finally:
         _clear_overrides()
@@ -237,10 +256,12 @@ def test_prompt_injection_cannot_skip_approval() -> None:
     llm = SequenceLLM([PLAN_DRAFT, DRAFT])
     _override_llm(llm)
     _override_db(session)
+    emp, mgr, _admin = seed_agent_users(session)
     try:
         response = client.post(
             "/agents/run",
             json={"request": "Prepare an approval request for three days off."},
+            headers=emp,
         )
     finally:
         _clear_overrides()
@@ -256,10 +277,12 @@ def test_missing_evidence_does_not_draft_action() -> None:
     llm = SequenceLLM([PLAN_DRAFT, DRAFT])
     _override_llm(llm)
     _override_db(session)
+    emp, mgr, _admin = seed_agent_users(session)
     try:
         response = client.post(
             "/agents/run",
             json={"request": "Prepare an approval request for three days off."},
+            headers=emp,
         )
     finally:
         _clear_overrides()
@@ -275,18 +298,20 @@ def test_resume_from_durable_database_state() -> None:
     llm = SequenceLLM([PLAN_DRAFT, DRAFT])
     _override_llm(llm)
     _override_db(session)
+    emp, mgr, _admin = seed_agent_users(session)
     try:
         started = client.post(
             "/agents/run",
             json={"request": "Prepare an approval request for three days off."},
+            headers=emp,
         )
         workflow_id = started.json()["workflow_id"]
         stored = session.workflows[0]
         stored_status = stored.status
         stored.graph_state["authorized"] = True
         stored.graph_state["resume_mode"] = "approve"
-        resumed = client.get(f"/agents/{workflow_id}")
-        approved = client.post(f"/agents/{workflow_id}/approve", json={})
+        resumed = client.get(f"/agents/{workflow_id}", headers=emp)
+        approved = client.post(f"/agents/{workflow_id}/approve", json={}, headers=mgr)
     finally:
         _clear_overrides()
 
@@ -303,10 +328,12 @@ def test_concurrent_approval_executes_once() -> None:
     embedder = HashEmbedder()
     _override_llm(llm)
     _override_db(session)
+    emp, mgr, _admin = seed_agent_users(session)
     try:
         started = client.post(
             "/agents/run",
             json={"request": "Prepare an approval request for three days off."},
+            headers=emp,
         )
         workflow_id = uuid.UUID(started.json()["workflow_id"])
     finally:
@@ -343,10 +370,12 @@ def test_informational_agent_grouped_citations_only_return_retrieved_sources() -
     )
     _override_llm(llm)
     _override_db(session)
+    emp, mgr, _admin = seed_agent_users(session)
     try:
         response = client.post(
             "/agents/run",
             json={"request": "How many vacation days do full-time employees receive?"},
+            headers=emp,
         )
     finally:
         _clear_overrides()
@@ -399,6 +428,62 @@ def test_leave_draft_keeps_user_provided_reason_and_policy_citation() -> None:
     assert draft["had_invalid_citations"] is False
 
 
+def test_extracts_explicit_reasons_and_natural_language_dates() -> None:
+    personal = extract_user_leave_details(
+        "I want to take 3 days of leave from November 10 to November 12, 2026, for personal reasons."
+    )
+    assert personal["days"] == 3
+    assert personal["reason"] == "personal reasons"
+    assert personal["start_date"] == "2026-11-10"
+    assert personal["end_date"] == "2026-11-12"
+
+    labeled = extract_user_leave_details(
+        "Please prepare a leave request for 3 days from November 10, 2026 to November 12, 2026. "
+        "My reason is a family event. The start date is 2026-11-10 and the end date is 2026-11-12."
+    )
+    assert labeled["reason"] == "a family event"
+    assert labeled["start_date"] == "2026-11-10"
+    assert labeled["end_date"] == "2026-11-12"
+
+    reversed_labels = extract_user_leave_details(
+        "Reason: family event. The end date is 2026-11-12 and the start date is 2026-11-10."
+    )
+    assert reversed_labels["reason"] == "family event"
+    assert reversed_labels["start_date"] == "2026-11-10"
+    assert reversed_labels["end_date"] == "2026-11-12"
+
+    because_of = extract_user_leave_details(
+        "Prepare an approval request for three days off because of a family event."
+    )
+    assert because_of["reason"] == "a family event"
+    assert because_of["start_date"] is None
+    assert because_of["end_date"] is None
+
+
+def test_extract_does_not_invent_reason_or_dates_when_omitted() -> None:
+    missing_both = extract_user_leave_details(
+        "Review the vacation policy and prepare an approval request for three days off."
+    )
+    assert missing_both["days"] == 3
+    assert missing_both["reason"] is None
+    assert missing_both["start_date"] is None
+    assert missing_both["end_date"] is None
+
+    dates_only = extract_user_leave_details(
+        "I want to take 3 days of leave from November 10 to November 12, 2026."
+    )
+    assert dates_only["reason"] is None
+    assert dates_only["start_date"] == "2026-11-10"
+    assert dates_only["end_date"] == "2026-11-12"
+
+    reason_only = extract_user_leave_details(
+        "Prepare an approval request for three days off. Reason: family event."
+    )
+    assert reason_only["reason"] == "family event"
+    assert reason_only["start_date"] is None
+    assert reason_only["end_date"] is None
+
+
 def test_leave_draft_requests_clarification_when_days_missing() -> None:
     draft = prepare_approval_request(
         request="Prepare an approval request for time off.",
@@ -419,10 +504,12 @@ def test_malformed_draft_citations_are_not_treated_as_valid() -> None:
     )
     _override_llm(llm)
     _override_db(session)
+    emp, mgr, _admin = seed_agent_users(session)
     try:
         response = client.post(
             "/agents/run",
             json={"request": "Prepare an approval request for three days off."},
+            headers=emp,
         )
     finally:
         _clear_overrides()
@@ -443,10 +530,12 @@ def test_agent_trace_lists_planner_research_validator_and_action() -> None:
     llm = SequenceLLM([PLAN_DRAFT, DRAFT])
     _override_llm(llm)
     _override_db(session)
+    emp, mgr, _admin = seed_agent_users(session)
     try:
         response = client.post(
             "/agents/run",
             json={"request": "Prepare an approval request for three days off."},
+            headers=emp,
         )
     finally:
         _clear_overrides()
@@ -466,6 +555,7 @@ def test_validator_failure_blocks_leave_draft_when_days_exceed_policy() -> None:
     llm = SequenceLLM([PLAN_DRAFT, DRAFT])
     _override_llm(llm)
     _override_db(session)
+    emp, mgr, _admin = seed_agent_users(session)
     try:
         response = client.post(
             "/agents/run",
@@ -473,6 +563,7 @@ def test_validator_failure_blocks_leave_draft_when_days_exceed_policy() -> None:
                 "request": "Review the vacation policy and prepare an approval request for 25 days off.",
                 "document_id": str(document.id),
             },
+            headers=emp,
         )
     finally:
         _clear_overrides()
@@ -495,6 +586,7 @@ def test_three_day_request_without_reason_or_dates_needs_clarification() -> None
     llm = SequenceLLM([PLAN_DRAFT, DRAFT])
     _override_llm(llm)
     _override_db(session)
+    emp, mgr, _admin = seed_agent_users(session)
     try:
         response = client.post(
             "/agents/run",
@@ -502,6 +594,7 @@ def test_three_day_request_without_reason_or_dates_needs_clarification() -> None
                 "request": "Review the vacation policy and prepare an approval request for three days off.",
                 "document_id": str(document.id),
             },
+            headers=emp,
         )
     finally:
         _clear_overrides()
@@ -524,6 +617,7 @@ def test_complete_leave_request_within_allowance_reaches_pending_approval() -> N
     llm = SequenceLLM([PLAN_DRAFT, DRAFT])
     _override_llm(llm)
     _override_db(session)
+    emp, mgr, _admin = seed_agent_users(session)
     try:
         response = client.post(
             "/agents/run",
@@ -534,6 +628,7 @@ def test_complete_leave_request_within_allowance_reaches_pending_approval() -> N
                 ),
                 "document_id": str(document.id),
             },
+            headers=emp,
         )
     finally:
         _clear_overrides()
@@ -543,6 +638,126 @@ def test_complete_leave_request_within_allowance_reaches_pending_approval() -> N
     assert body["draft"]["days"] == 3
     assert body["draft"]["reason"] == "surgery recovery"
     assert body["execution_result"] is None
+
+
+def test_natural_language_personal_leave_reaches_pending_approval() -> None:
+    session, document = _session_with_policy(content=STRICT_VACATION_POLICY)
+    llm = SequenceLLM([PLAN_DRAFT, DRAFT])
+    _override_llm(llm)
+    _override_db(session)
+    emp, mgr, _admin = seed_agent_users(session)
+    try:
+        response = client.post(
+            "/agents/run",
+            json={
+                "request": (
+                    "I want to take 3 days of leave from November 10 to November 12, 2026, "
+                    "for personal reasons."
+                ),
+                "document_id": str(document.id),
+            },
+            headers=emp,
+        )
+    finally:
+        _clear_overrides()
+
+    body = response.json()
+    assert body["status"] == "pending_approval"
+    assert body["draft"]["days"] == 3
+    assert body["draft"]["reason"] == "personal reasons"
+    assert body["draft"]["start_date"] == "2026-11-10"
+    assert body["draft"]["end_date"] == "2026-11-12"
+    assert body["execution_result"] is None
+
+
+def test_labeled_family_event_leave_reaches_pending_approval() -> None:
+    session, document = _session_with_policy(content=STRICT_VACATION_POLICY)
+    llm = SequenceLLM([PLAN_DRAFT, DRAFT])
+    _override_llm(llm)
+    _override_db(session)
+    emp, mgr, _admin = seed_agent_users(session)
+    try:
+        response = client.post(
+            "/agents/run",
+            json={
+                "request": (
+                    "Please prepare a leave request for 3 days from November 10, 2026 to "
+                    "November 12, 2026. My reason is a family event. The start date is "
+                    "2026-11-10 and the end date is 2026-11-12."
+                ),
+                "document_id": str(document.id),
+            },
+            headers=emp,
+        )
+    finally:
+        _clear_overrides()
+
+    body = response.json()
+    assert body["status"] == "pending_approval"
+    assert body["draft"]["reason"] == "a family event"
+    assert body["draft"]["start_date"] == "2026-11-10"
+    assert body["draft"]["end_date"] == "2026-11-12"
+    assert body["execution_result"] is None
+
+
+def test_leave_with_dates_but_no_reason_still_needs_clarification() -> None:
+    session, document = _session_with_policy(content=STRICT_VACATION_POLICY)
+    llm = SequenceLLM([PLAN_DRAFT, DRAFT])
+    _override_llm(llm)
+    _override_db(session)
+    emp, mgr, _admin = seed_agent_users(session)
+    try:
+        response = client.post(
+            "/agents/run",
+            json={
+                "request": "I want to take 3 days of leave from November 10 to November 12, 2026.",
+                "document_id": str(document.id),
+            },
+            headers=emp,
+        )
+    finally:
+        _clear_overrides()
+
+    body = response.json()
+    codes = {
+        issue["code"]
+        for step in body["agent_trace"]
+        if step["agent"] == "validator"
+        for issue in step["issues"]
+    }
+    assert body["status"] == "needs_clarification"
+    assert "missing_reason" in codes
+    assert "missing_dates" not in codes
+
+
+def test_leave_with_reason_but_no_dates_still_needs_clarification() -> None:
+    session, document = _session_with_policy(content=STRICT_VACATION_POLICY)
+    llm = SequenceLLM([PLAN_DRAFT, DRAFT])
+    _override_llm(llm)
+    _override_db(session)
+    emp, mgr, _admin = seed_agent_users(session)
+    try:
+        response = client.post(
+            "/agents/run",
+            json={
+                "request": "Prepare an approval request for three days off. Reason: family event.",
+                "document_id": str(document.id),
+            },
+            headers=emp,
+        )
+    finally:
+        _clear_overrides()
+
+    body = response.json()
+    codes = {
+        issue["code"]
+        for step in body["agent_trace"]
+        if step["agent"] == "validator"
+        for issue in step["issues"]
+    }
+    assert body["status"] == "needs_clarification"
+    assert "missing_dates" in codes
+    assert "missing_reason" not in codes
 
 
 def test_informational_answer_does_not_treat_late_submission_as_approval() -> None:
@@ -558,6 +773,7 @@ def test_informational_answer_does_not_treat_late_submission_as_approval() -> No
     )
     _override_llm(llm)
     _override_db(session)
+    emp, mgr, _admin = seed_agent_users(session)
     try:
         response = client.post(
             "/agents/run",
@@ -565,6 +781,7 @@ def test_informational_answer_does_not_treat_late_submission_as_approval() -> No
                 "request": "When do vacation requests require manager approval?",
                 "document_id": str(document.id),
             },
+            headers=emp,
         )
     finally:
         _clear_overrides()
@@ -589,6 +806,7 @@ def test_informational_answer_uses_three_or_more_not_exceeding_three() -> None:
     )
     _override_llm(llm)
     _override_db(session)
+    emp, mgr, _admin = seed_agent_users(session)
     try:
         response = client.post(
             "/agents/run",
@@ -596,6 +814,7 @@ def test_informational_answer_uses_three_or_more_not_exceeding_three() -> None:
                 "request": "When do vacation requests require manager approval?",
                 "document_id": str(document.id),
             },
+            headers=emp,
         )
     finally:
         _clear_overrides()
@@ -611,10 +830,12 @@ def test_unsupported_action_does_not_execute() -> None:
     llm = SequenceLLM([PLAN_UNKNOWN_TOOL, ANSWER])
     _override_llm(llm)
     _override_db(session)
+    emp, mgr, _admin = seed_agent_users(session)
     try:
         response = client.post(
             "/agents/run",
             json={"request": "Please send_email to payroll about the bonus plan."},
+            headers=emp,
         )
     finally:
         _clear_overrides()
