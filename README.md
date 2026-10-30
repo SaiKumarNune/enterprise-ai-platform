@@ -52,6 +52,7 @@ alembic upgrade head
 | `POST` | `/documents/{id}/process` | Extract, chunk, embed, persist |
 | `GET` | `/documents/{id}/chunks` | Ordered chunk list |
 | `POST` | `/search` | Semantic search over chunk embeddings |
+| `POST` | `/rag/ask` | Citation-grounded RAG answer from retrieved chunks |
 
 `POST /documents/{id}/process` is synchronous. It extracts text, chunks it, embeds all new chunks, then replaces previous chunks in one commit. If embedding fails, old chunks are left unchanged and status becomes `failed`.
 
@@ -70,6 +71,29 @@ curl -X POST http://127.0.0.1:8000/search \
 ```
 
 Optional `document_id` limits results to one document (`404` if that document does not exist). `top_k` is 1–50 (default 5).
+
+## RAG question answering
+
+`POST /rag/ask` is **synchronous**. It embeds the question, retrieves chunks via the existing pgvector search, builds a bounded context window, and asks a local Ollama model. Retrieved text is passed as untrusted data, not as system instructions.
+
+Ollama is installed in this environment (`0.33.3`) but the daemon was not running and no model was pulled during this change. Default model is `llama3.2:3b` (fits ~16 GB Apple Silicon). Do not download during tests.
+
+```bash
+ollama serve
+ollama pull llama3.2:3b
+```
+
+Configure `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_TIMEOUT_SECONDS`, `RAG_CONTEXT_CHARS`, and `RAG_MIN_SIMILARITY` in `.env`.
+
+```bash
+curl -X POST http://127.0.0.1:8000/rag/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "How many vacation days do employees receive?", "top_k": 5}'
+```
+
+Response fields: `answer`, `sources` (`source_id`, `document_id`, `chunk_id`, `page_number`, `similarity`), `retrieval_count`, `grounded`, `model`. `similarity` is cosine similarity. The answer cites sources as `[S1]`, `[S2]`. Unsupported citations are stripped; uncited model output is replaced with an insufficient-information message.
+
+This is not a guarantee of factual correctness. Prompting and citation checks reduce hallucinations; they do not eliminate them. Latency is limited by local embedding + Ollama generation on the request thread (`503` if Ollama is down, `504` on timeout).
 
 ## Run tests
 

@@ -26,6 +26,11 @@ class Settings:
     chunk_overlap: int
     embedding_model: str
     embedding_dimensions: int
+    ollama_base_url: str
+    ollama_model: str
+    ollama_timeout_seconds: float
+    rag_context_chars: int
+    rag_min_similarity: float
 
     @property
     def database_url(self) -> str:
@@ -59,6 +64,11 @@ def _load_settings() -> Settings:
         chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "200")),
         embedding_model=os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2"),
         embedding_dimensions=int(os.getenv("EMBEDDING_DIMENSIONS", "384")),
+        ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/"),
+        ollama_model=os.getenv("OLLAMA_MODEL", "llama3.2:3b"),
+        ollama_timeout_seconds=float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "60")),
+        rag_context_chars=int(os.getenv("RAG_CONTEXT_CHARS", "6000")),
+        rag_min_similarity=float(os.getenv("RAG_MIN_SIMILARITY", "0.2")),
     )
 
 
