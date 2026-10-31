@@ -1,6 +1,9 @@
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+RetrievalMode = Literal["semantic", "lexical", "hybrid"]
 
 
 class RagAskRequest(BaseModel):
@@ -9,6 +12,7 @@ class RagAskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     top_k: int = Field(default=5, ge=1, le=20)
     document_id: UUID | None = None
+    retrieval_mode: RetrievalMode | None = None
 
     @field_validator("question")
     @classmethod
@@ -35,3 +39,4 @@ class RagAskResponse(BaseModel):
     model: str
     citation_valid: bool = True
     abstained: bool = False
+    retrieval_mode: RetrievalMode | None = None

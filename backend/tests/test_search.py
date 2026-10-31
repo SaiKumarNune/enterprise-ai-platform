@@ -91,7 +91,11 @@ def test_search_excludes_chunks_without_embeddings() -> None:
     _override_db(session)
     _user, headers = auth_headers(session)
     try:
-        response = client.post("/search", json={"query": "searchable", "top_k": 5}, headers=headers)
+        response = client.post(
+            "/search",
+            json={"query": "searchable", "top_k": 5, "retrieval_mode": "semantic"},
+            headers=headers,
+        )
     finally:
         _clear_overrides()
 
@@ -150,7 +154,11 @@ def test_search_handles_embedding_failure() -> None:
     _user, headers = auth_headers(session)
     app.dependency_overrides[get_embedder] = lambda: FailingEmbedder()
     try:
-        response = client.post("/search", json={"query": "hello"}, headers=headers)
+        response = client.post(
+            "/search",
+            json={"query": "hello", "retrieval_mode": "semantic"},
+            headers=headers,
+        )
     finally:
         _clear_overrides()
 

@@ -3,8 +3,8 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, ForeignKey, Integer, Text, UniqueConstraint, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Computed, DateTime, ForeignKey, Index, Integer, Text, UniqueConstraint, func
+from sqlalchemy.dialects.postgresql import TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -17,6 +17,7 @@ class DocumentChunk(Base):
     __tablename__ = "document_chunks"
     __table_args__ = (
         UniqueConstraint("document_id", "chunk_index", name="uq_document_chunks_document_id_chunk_index"),
+        Index("ix_document_chunks_search_vector", "search_vector", postgresql_using="gin"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -39,5 +40,10 @@ class DocumentChunk(Base):
         server_default=func.now(),
     )
     embedding: Mapped[list[float] | None] = mapped_column(Vector(384), nullable=True)
+    search_vector: Mapped[str | None] = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('english'::regconfig, COALESCE(content, ''))", persisted=True),
+        nullable=True,
+    )
 
     document: Mapped["Document"] = relationship(back_populates="chunks")

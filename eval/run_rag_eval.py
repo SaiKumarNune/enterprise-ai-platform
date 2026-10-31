@@ -27,7 +27,7 @@ from app.models.chunk import DocumentChunk  # noqa: E402
 from app.models.document import Document  # noqa: E402
 from app.services.authorization import Principal  # noqa: E402
 from app.services.rag import INSUFFICIENT_ANSWER, answer_question  # noqa: E402
-from app.services.search import search_similar_chunks  # noqa: E402
+from app.services.retrieval import retrieve_chunks  # noqa: E402
 from tests.auth_helpers import own_session_documents, seed_user  # noqa: E402
 from tests.fake_embeddings import HashEmbedder  # noqa: E402
 from tests.test_documents import FakeSession  # noqa: E402
@@ -124,14 +124,15 @@ def run_eval(dataset_path: Path, top_k: int) -> dict:
         document_key = case.get("document_id")
         document_uuid = document_ids.get(document_key) if document_key else None
         query_vector = embedder.embed_texts([case["question"]])[0]
-        retrieved_rows = search_similar_chunks(
+        retrieved_hits = retrieve_chunks(
             session,
-            query_vector,
-            top_k=top_k,
+            query=case["question"],
             principal=principal,
+            top_k=top_k,
+            query_embedding=query_vector,
             document_id=document_uuid,
         )
-        retrieved_ids = [chunk.id for chunk, _score in retrieved_rows]
+        retrieved_ids = [hit.chunk.id for hit in retrieved_hits]
         gold = [chunk_ids[item] for item in case.get("gold_chunk_ids", [])]
         answer = answer_question(
             session,

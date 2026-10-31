@@ -40,6 +40,7 @@ def ask_rag(
             top_k=payload.top_k,
             principal=principal,
             document_id=payload.document_id,
+            retrieval_mode=payload.retrieval_mode,
         )
     except DocumentAccessDenied:
         raise HTTPException(
@@ -92,4 +93,5 @@ def ask_rag(
         model=result.model,
         citation_valid=result.citation_valid,
         abstained=result.abstained,
+        retrieval_mode=result.retrieval_mode,
     )

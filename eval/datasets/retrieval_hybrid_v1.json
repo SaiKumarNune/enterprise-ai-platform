@@ -1,0 +1,41 @@
+{
+  "version": "1.0",
+  "description": "Synthetic retrieval cases for comparing lexical, semantic, and hybrid rankers. HashEmbedder is not MiniLM; results are not real-world IR quality.",
+  "documents": [
+    {
+      "id": "policy",
+      "filename": "policy.txt",
+      "chunks": [
+        {
+          "id": "exact-id",
+          "content": "Submit travel using form POL-4419 before purchasing tickets."
+        },
+        {
+          "id": "vacation-days",
+          "content": "Full-time employees receive 15 vacation days each calendar year."
+        },
+        {
+          "id": "parking",
+          "content": "The parking garage on Maple Street opens at 07:00 on weekdays."
+        }
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "id": "rare-identifier",
+      "question": "POL-4419",
+      "gold_chunk_ids": ["exact-id"]
+    },
+    {
+      "id": "keyword-vacation",
+      "question": "vacation days",
+      "gold_chunk_ids": ["vacation-days"]
+    },
+    {
+      "id": "paraphrase-allotment",
+      "question": "How much paid time off do full-time staff get each year?",
+      "gold_chunk_ids": ["vacation-days"]
+    }
+  ]
+}

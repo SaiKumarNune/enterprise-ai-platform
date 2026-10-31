@@ -3,17 +3,11 @@ from __future__ import annotations
 import math
 from uuid import UUID
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.chunk import DocumentChunk
-from app.models.document import Document
-from app.services.authorization import (
-    Principal,
-    authorized_document_clause,
-    authorized_document_ids,
-    require_document,
-)
+from app.services.authorization import Principal
+from app.services.retrieval import SEMANTIC, retrieve_chunks
 
 
 def search_similar_chunks(
@@ -24,28 +18,17 @@ def search_similar_chunks(
     principal: Principal,
     document_id: UUID | None = None,
 ) -> list[tuple[DocumentChunk, float]]:
-    if document_id is not None:
-        require_document(db, principal, document_id, "read")
-    in_memory = getattr(db, "search_chunks", None)
-    if callable(in_memory):
-        allowed = authorized_document_ids(db, principal, "read")
-        if document_id is not None:
-            allowed = allowed & {document_id}
-        return in_memory(query_embedding, top_k, document_id, allowed_document_ids=allowed)
-
-    distance = DocumentChunk.embedding.cosine_distance(query_embedding)
-    similarity = (1 - distance).label("similarity")
-    statement = (
-        select(DocumentChunk, similarity)
-        .join(Document, Document.id == DocumentChunk.document_id)
-        .where(DocumentChunk.embedding.is_not(None))
-        .where(authorized_document_clause(principal, "read"))
-        .order_by(distance)
-        .limit(top_k)
+    """Semantic pgvector retrieval. Prefer retrieve_chunks for hybrid/lexical modes."""
+    hits = retrieve_chunks(
+        db,
+        query="",
+        principal=principal,
+        top_k=top_k,
+        mode=SEMANTIC,
+        query_embedding=query_embedding,
+        document_id=document_id,
     )
-    if document_id is not None:
-        statement = statement.where(DocumentChunk.document_id == document_id)
-    return [(row[0], float(row[1])) for row in db.execute(statement).all()]
+    return [(hit.chunk, hit.similarity) for hit in hits]
 
 
 def cosine_similarity(left: list[float], right: list[float]) -> float:

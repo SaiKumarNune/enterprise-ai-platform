@@ -13,7 +13,7 @@ from app.models.chunk import DocumentChunk
 from app.services.embeddings import EmbeddingBackend
 from app.services.llm import LLMBackend
 from app.services.authorization import Principal
-from app.services.search import search_similar_chunks
+from app.services.retrieval import HYBRID, LEXICAL, SEMANTIC, normalize_retrieval_mode, retrieve_chunks
 
 logger = logging.getLogger("app.rag")
 
@@ -93,6 +93,7 @@ class RagAnswer:
     model: str
     citation_valid: bool = True
     abstained: bool = False
+    retrieval_mode: str | None = None
 
 
 def answer_question(
@@ -104,26 +105,28 @@ def answer_question(
     top_k: int,
     principal: Principal,
     document_id: UUID | None = None,
+    retrieval_mode: str | None = None,
 ) -> RagAnswer:
     started = time.perf_counter()
     error_type: str | None = None
     retrieval_count = 0
     try:
-        selected, sources, retrieval_count = retrieve_evidence(
+        selected, sources, retrieval_count, used_mode = retrieve_evidence(
             db,
             embedder,
             question=question,
             top_k=top_k,
             principal=principal,
             document_id=document_id,
+            retrieval_mode=retrieval_mode,
         )
         if not selected:
-            return _insufficient(retrieval_count)
+            return _insufficient(retrieval_count, used_mode)
         user_prompt = build_user_prompt(question, selected)
         raw_answer = llm.generate(SYSTEM_PROMPT, user_prompt)
         check = inspect_answer(raw_answer, {source.source_id for source in sources})
         if check.abstained:
-            return _insufficient(retrieval_count)
+            return _insufficient(retrieval_count, used_mode)
 
         return RagAnswer(
             answer=check.cleaned_answer,
@@ -133,6 +136,7 @@ def answer_question(
             model=settings.ollama_model,
             citation_valid=check.citation_valid,
             abstained=False,
+            retrieval_mode=used_mode,
         )
     except Exception as exc:
         error_type = type(exc).__name__
@@ -201,24 +205,42 @@ def retrieve_evidence(
     top_k: int,
     principal: Principal,
     document_id: UUID | None = None,
-) -> tuple[list[tuple[DocumentChunk, float]], list[RagSource], int]:
-    query_embedding = embedder.embed_texts([question])[0]
+    retrieval_mode: str | None = None,
+) -> tuple[list[tuple[DocumentChunk, float]], list[RagSource], int, str]:
+    mode = normalize_retrieval_mode(retrieval_mode)
+    query_embedding = None
+    if mode in {SEMANTIC, HYBRID}:
+        try:
+            query_embedding = embedder.embed_texts([question])[0]
+        except Exception:
+            if mode == SEMANTIC:
+                raise
+            mode = LEXICAL
     candidate_k = min(20, max(top_k, top_k * settings.rag_retrieve_multiplier))
-    rows = search_similar_chunks(
+    hits = retrieve_chunks(
         db,
-        query_embedding,
-        top_k=candidate_k,
+        query=question,
         principal=principal,
+        top_k=candidate_k,
+        mode=mode,
+        query_embedding=query_embedding,
         document_id=document_id,
     )
+    ranked = [
+        (hit.chunk, hit.similarity if mode == SEMANTIC else hit.score)
+        for hit in hits
+    ]
+    min_similarity = settings.rag_min_similarity if mode == SEMANTIC else 0.0
     selected = select_context(
-        rows,
-        min_similarity=settings.rag_min_similarity,
+        ranked,
+        min_similarity=min_similarity,
         char_budget=settings.rag_context_chars,
         max_chunks=top_k,
     )
+    cosine_by_id = {hit.chunk.id: hit.similarity for hit in hits}
+    selected = [(chunk, cosine_by_id.get(chunk.id, score)) for chunk, score in selected]
     sources = assign_source_ids(selected) if selected else []
-    return selected, sources, len(rows)
+    return selected, sources, len(hits), mode
 
 
 def assign_source_ids(selected: list[tuple[DocumentChunk, float]]) -> list[RagSource]:
@@ -379,7 +401,7 @@ def _assign_source_ids(selected: list[tuple[DocumentChunk, float]]) -> list[RagS
     ]
 
 
-def _insufficient(retrieval_count: int) -> RagAnswer:
+def _insufficient(retrieval_count: int, retrieval_mode: str | None = None) -> RagAnswer:
     return RagAnswer(
         answer=INSUFFICIENT_ANSWER,
         sources=[],
@@ -388,6 +410,7 @@ def _insufficient(retrieval_count: int) -> RagAnswer:
         model=settings.ollama_model,
         citation_valid=True,
         abstained=True,
+        retrieval_mode=retrieval_mode,
     )
 
 

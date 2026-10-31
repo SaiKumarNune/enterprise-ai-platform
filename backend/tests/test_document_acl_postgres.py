@@ -7,20 +7,13 @@ for the live enterprise_ai database. Unset TEST_DATABASE_URL skips them.
 
 from __future__ import annotations
 
-import os
-from collections.abc import Iterator
 from datetime import datetime, timezone
 from uuid import uuid4
 
-import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.pool import NullPool
 
-from app.core.database import Base, get_db
 from app.core.security import create_access_token, hash_password, normalize_email
-from app.main import app
 from app.models.acl import DocumentACL
 from app.models.audit import AuditEvent
 from app.models.chunk import DocumentChunk
@@ -28,52 +21,9 @@ from app.models.document import Document
 from app.models.tenant import Tenant
 from app.models.user import ADMIN, EMPLOYEE, User
 from app.models.workflow import AgentWorkflow
+from tests.postgres_isolation import SKIP_ISOLATED_POSTGRES, postgres_client as postgres_client
 
-TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL", "").strip()
-
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason=(
-        "PostgreSQL ACL checks require an isolated TEST_DATABASE_URL; "
-        "skipped to protect the development database."
-    ),
-)
-
-
-def _require_isolated_url(url: str) -> str:
-    lowered = url.lower()
-    if "enterprise_ai" in lowered and "test" not in lowered:
-        raise RuntimeError(
-            "Refusing TEST_DATABASE_URL that looks like the development database. "
-            "Use a dedicated database whose name includes 'test'."
-        )
-    return url
-
-
-@pytest.fixture()
-def postgres_client() -> Iterator[tuple[TestClient, sessionmaker[Session]]]:
-    url = _require_isolated_url(TEST_DATABASE_URL)
-    engine = create_engine(url, poolclass=NullPool)
-    with engine.begin() as connection:
-        connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-    Base.metadata.drop_all(engine)
-    Base.metadata.create_all(engine)
-    factory = sessionmaker(bind=engine, expire_on_commit=False)
-
-    def override_get_db() -> Iterator[Session]:
-        session = factory()
-        try:
-            yield session
-        finally:
-            session.close()
-
-    app.dependency_overrides[get_db] = override_get_db
-    try:
-        yield TestClient(app), factory
-    finally:
-        app.dependency_overrides.pop(get_db, None)
-        Base.metadata.drop_all(engine)
-        engine.dispose()
+pytestmark = SKIP_ISOLATED_POSTGRES
 
 
 def _seed_user(session: Session, tenant_id, *, role: str, email: str) -> User:

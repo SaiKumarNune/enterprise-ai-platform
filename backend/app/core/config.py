@@ -33,6 +33,9 @@ class Settings:
     rag_min_similarity: float
     rag_retrieve_multiplier: int
     agent_max_steps: int
+    retrieval_mode: str
+    rrf_k: int
+    retrieval_candidate_pool: int
     jwt_secret: str = field(repr=False)
     jwt_algorithm: str
     jwt_expire_minutes: int
@@ -77,6 +80,9 @@ def _load_settings() -> Settings:
         rag_min_similarity=float(os.getenv("RAG_MIN_SIMILARITY", "0.2")),
         rag_retrieve_multiplier=int(os.getenv("RAG_RETRIEVE_MULTIPLIER", "2")),
         agent_max_steps=int(os.getenv("AGENT_MAX_STEPS", "8")),
+        retrieval_mode=os.getenv("RETRIEVAL_MODE", "hybrid").strip().lower() or "hybrid",
+        rrf_k=int(os.getenv("RRF_K", "60")),
+        retrieval_candidate_pool=int(os.getenv("RETRIEVAL_CANDIDATE_POOL", "50")),
         jwt_secret=os.getenv("JWT_SECRET", ""),
         jwt_algorithm=os.getenv("JWT_ALGORITHM", "HS256"),
         jwt_expire_minutes=int(os.getenv("JWT_EXPIRE_MINUTES", "60")),

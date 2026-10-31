@@ -151,7 +151,7 @@ def knowledge_search(
     document_id: UUID | None,
     principal: Principal,
 ) -> dict[str, Any]:
-    selected, sources, retrieval_count = retrieve_evidence(
+    selected, sources, retrieval_count, _mode = retrieve_evidence(
         db,
         embedder,
         question=question,

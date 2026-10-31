@@ -40,7 +40,7 @@ alembic current
 alembic upgrade head
 ```
 
-Phase 10 revision `b0c1d2e3f4a5` (tenants, document owner/ACL, audit) revises `a9b0c1d2e3f4`. Additive only; it does not drop tables or reset volumes.
+Phase 11 revision `c1d2e3f4a5b6` (generated `document_chunks.search_vector` + GIN) revises `b0c1d2e3f4a5`. Additive only; it does not drop tables or reset volumes. Apply it yourself with `alembic upgrade head` when ready; tests never migrate the development database.
 
 **Existing data:** if `users`, `documents`, or `agent_workflows` already have rows, set `LEGACY_TENANT_ID`. Do **not** set `LEGACY_DOCUMENT_OWNER_ID` (blanket assignment is rejected). Map only verified documents:
 
@@ -95,7 +95,7 @@ Privileges are `read`, `write`, and `manage` (`manage` includes write and read).
 | Manager | manage (as owner) | no automatic document access; can approve **same-tenant** workflows | none (404) |
 | Admin | manage | manage assigned documents in **their** tenant; quarantined docs are **not** readable | none (404) |
 
-`PUT /documents/{id}/permissions` and `DELETE /documents/{id}/permissions/{user_id}` require `manage`. Users cannot grant privileges to themselves. Shares cannot cross tenants. Vector search applies this filter **in the retrieval query** before ranking and `top_k`.
+`PUT /documents/{id}/permissions` and `DELETE /documents/{id}/permissions/{user_id}` require `manage`. Users cannot grant privileges to themselves. Shares cannot cross tenants. Lexical, semantic, and hybrid retrieval apply this filter **in the retrieval query** before ranking and `top_k`.
 
 ### Development-only admin bootstrap
 
@@ -167,30 +167,47 @@ curl -X POST http://127.0.0.1:8000/agents/run \
 | `PUT` | `/documents/{id}/permissions` | Grant `read`/`write`/`manage` (manage) |
 | `DELETE` | `/documents/{id}/permissions/{user_id}` | Revoke ACL grant (manage) |
 | `GET` | `/documents/{id}/chunks` | Ordered chunk list |
-| `POST` | `/search` | Semantic search over chunk embeddings |
+| `POST` | `/search` | Hybrid / lexical / semantic retrieval over authorized chunks |
 | `POST` | `/rag/ask` | Citation-grounded RAG answer from retrieved chunks |
 
 `POST /documents/{id}/process` is synchronous. It extracts text, chunks it, embeds all new chunks, then replaces previous chunks in one commit. If embedding fails, old chunks are left unchanged and status becomes `failed`.
 
 `PATCH` cannot change `status`.
 
-### Semantic search
+### Hybrid retrieval
 
-`POST /search` embeds the query with the same model and ranks `document_chunks` by pgvector **cosine distance**. The JSON `similarity` field is **cosine similarity** (`1 - cosine_distance`) for L2-normalized 384-d vectors. Chunks without embeddings are excluded.
+`POST /search` supports `retrieval_mode`: `semantic`, `lexical`, or `hybrid` (API default follows `RETRIEVAL_MODE`, which defaults to `hybrid`). Existing clients that omit the field keep the same JSON hit shape (`chunk_id`, `document_id`, `chunk_index`, `content`, `page_number`, `similarity`).
 
-No ANN index (HNSW/IVFFlat) is created yet. Exact nearest-neighbor search is enough for local development volumes.
+| Mode | Ranker | `similarity` field |
+|---|---|---|
+| `semantic` | pgvector cosine distance on 384-d MiniLM embeddings | cosine similarity (`1 - cosine_distance`) |
+| `lexical` | PostgreSQL `english` FTS (`plainto_tsquery` + `ts_rank_cd`) | `ts_rank_cd` (in-memory tests use a token overlap stand-in) |
+| `hybrid` | Reciprocal Rank Fusion of the two lists, `score = Σ 1/(k + rank)`, default `k=60` | RRF score |
+
+PostgreSQL `ts_rank` / `ts_rank_cd` is **not BM25**. It does not use Robertson-Spärck-Jones IDF or the BM25 TF saturation terms. True BM25 would need an extension such as ParadeDB `pg_search` or an in-process scorer that cannot enforce tenant/ACL filters in SQL. Do not install extra database extensions without approval.
+
+Both legs join `documents` and apply the Phase 10 authorization predicate (tenant, owner/ACL, non-quarantined `owner_id IS NOT NULL`) **before** `ORDER BY` and `LIMIT`. Forbidden chunks are not loaded into Python and filtered afterward. `RETRIEVAL_CANDIDATE_POOL` (default 50) sizes each hybrid candidate list; results are fused, deduplicated by chunk ID, and truncated to `top_k`. Ties break by UUID string.
+
+`RAG_MIN_SIMILARITY` applies only to `semantic` RAG retrieval. Hybrid/lexical RAG keeps the fused/lexical ranking and still reports cosine on `sources.similarity` when an embedding exists.
+
+Lexical queries that are only English stop words, or that produce an empty `tsquery`, return `[]`. Uncommon identifiers such as `POL-4419` are searchable. If embedding fails in `hybrid` mode, search degrades to lexical; `semantic` mode still returns 500.
+
+Optional `include_diagnostics=true` sets `retrieval_mode` on each hit. It does not include unauthorized document IDs, titles, or candidate counts.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/search \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"query": "vacation policy", "top_k": 5}'
+  -d '{"query": "vacation policy", "top_k": 5, "retrieval_mode": "hybrid"}'
 ```
 
 Optional `document_id` limits results to one document (`404` if that document does not exist). `top_k` is 1–50 (default 5).
 
+Apply `c1d2e3f4a5b6` so `document_chunks.search_vector` exists. No ANN index (HNSW/IVFFlat) is created yet. Exact nearest-neighbor search is enough for local development volumes.
+
 ## RAG question answering
 
-`POST /rag/ask` is **synchronous**. It embeds the question, retrieves chunks via the existing pgvector search, builds a bounded context window, and asks a local Ollama model. Retrieved text is passed as untrusted data, not as system instructions.
+`POST /rag/ask` is **synchronous**. It retrieves chunks through the same authorized hybrid retriever as `/search` (`retrieval_mode` optional; default `RETRIEVAL_MODE`), builds a bounded context window, and asks a local Ollama model. Retrieved text is passed as untrusted data, not as system instructions.
 
 Ollama is installed in this environment (`0.33.3`) but the daemon was not running and no model was pulled during this change. Default model is `llama3.2:3b` (fits ~16 GB Apple Silicon). Do not download during tests.
 
@@ -201,12 +218,12 @@ ollama pull llama3.2:3b
 
 Configure `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_TIMEOUT_SECONDS`, `RAG_CONTEXT_CHARS`, `RAG_MIN_SIMILARITY`, and `RAG_RETRIEVE_MULTIPLIER` in `.env`.
 
-`RAG_MIN_SIMILARITY` (default `0.2`) drops weak neighbors before generation. Higher values increase abstention and reduce noisy context; lower values increase recall and can add irrelevant chunks. `RAG_RETRIEVE_MULTIPLIER` fetches extra candidates (capped at 20) then filters, dedupes, and assigns stable `[S1]…` IDs in similarity order. `/search` is unchanged and does not use this threshold.
+`RAG_MIN_SIMILARITY` (default `0.2`) drops weak **semantic** neighbors before generation. Hybrid and lexical RAG skip that cosine cutoff so rare identifiers are not dropped. `RAG_RETRIEVE_MULTIPLIER` fetches extra fused candidates (capped at 20) then filters, dedupes, and assigns stable `[S1]…` IDs.
 
 ### RAG architecture
 
-1. Embed the question with MiniLM.
-2. Retrieve extra neighbors from pgvector (same cosine search as `/search`).
+1. Embed the question with MiniLM when the mode needs vectors.
+2. Retrieve extra neighbors with the selected mode (hybrid RRF by default).
 3. Filter by `RAG_MIN_SIMILARITY`, drop near-duplicates (keep longer evidence), apply a character budget.
 4. Generate a short synthesized answer with a local Ollama model. Document text is wrapped as untrusted data.
 5. Parse `[S#]` citations, strip unknown IDs, and flag missing citations on factual answers.
@@ -219,9 +236,10 @@ Configure `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_TIMEOUT_SECONDS`, `RAG_CONT
 ```bash
 python eval/run_rag_eval.py
 python eval/run_rag_eval.py --output /tmp/rag_eval.json
+python eval/run_retrieval_eval.py
 ```
 
-Uses synthetic documents in `eval/datasets/rag_quality_v1.json` plus fake embeddings/LLM. It does not write to PostgreSQL or download models. Mock aggregates are not MiniLM or Ollama quality scores.
+Uses synthetic documents in `eval/datasets/rag_quality_v1.json` and `eval/datasets/retrieval_hybrid_v1.json` plus fake embeddings/LLM. It does not write to PostgreSQL or download models. Mock aggregates are not MiniLM, PostgreSQL FTS, BM25, or Ollama quality scores.
 
 | Metric | Definition |
 |---|---|
@@ -233,10 +251,10 @@ Uses synthetic documents in `eval/datasets/rag_quality_v1.json` plus fake embedd
 ```bash
 curl -X POST http://127.0.0.1:8000/rag/ask \
   -H "Content-Type: application/json" \
-  -d '{"question": "How many vacation days do employees receive?", "top_k": 5}'
+  -d '{"question": "How many vacation days do employees receive?", "top_k": 5, "retrieval_mode": "hybrid"}'
 ```
 
-Response fields: `answer`, `sources` (`source_id`, `document_id`, `chunk_id`, `chunk_index`, `page_number`, `similarity`), `retrieval_count`, `grounded`, `citation_valid`, `abstained`, `model`. `similarity` is cosine similarity. The answer cites sources as `[S1]`, `[S2]`, or grouped `[S1, S4]`. Unknown IDs are stripped, remaining citations always match `sources`, and `citation_valid` is false if any invalid ID was generated or a factual answer lacks citations. Stripping an invalid ID does not make the response citation-valid. Factual answers without citations stay in the response with `grounded=false` and `citation_valid=false`; they are not rewritten into the insufficient-information fallback.
+Response fields: `answer`, `sources` (`source_id`, `document_id`, `chunk_id`, `chunk_index`, `page_number`, `similarity`), `retrieval_count`, `grounded`, `citation_valid`, `abstained`, `model`, `retrieval_mode`. Source `similarity` is cosine when an embedding exists. The answer cites sources as `[S1]`, `[S2]`, or grouped `[S1, S4]`. Unknown IDs are stripped, remaining citations always match `sources`, and `citation_valid` is false if any invalid ID was generated or a factual answer lacks citations. Stripping an invalid ID does not make the response citation-valid. Factual answers without citations stay in the response with `grounded=false` and `citation_valid=false`; they are not rewritten into the insufficient-information fallback.
 
 This is not a guarantee of factual correctness. Prompting and citation checks reduce some failure modes; they do not eliminate hallucinations or prove that a cited claim is true. Latency is limited by local embedding + Ollama generation on the request thread (`503` if Ollama is down, `504` on timeout).
 
@@ -270,7 +288,7 @@ LangGraph is in-process orchestration only. PostgreSQL `agent_workflows` (includ
 Allowlisted tools: `knowledge_search`, `prepare_approval_request`, `execute_approved_action`. Only `POST /agents/{id}/approve` sets `authorized=True` after a row lock on `pending_approval`. Simulated execution writes `execution_result.simulated=true` and does not send email or change documents.
 
 ```bash
-alembic upgrade head   # head b0c1d2e3f4a5 (tenants, ACL, audit); prior a9b0c1d2e3f4
+alembic upgrade head   # head c1d2e3f4a5b6 (chunk tsvector); prior b0c1d2e3f4a5
 ```
 
 ```bash
@@ -309,3 +327,9 @@ pytest
 ```
 
 Tests use a fake embedder, an in-memory session, and temporary directories. They do not use development PostgreSQL and they do not download the MiniLM model. Agent tests authenticate with JWT secrets set only in the pytest process.
+
+Isolated PostgreSQL FTS/pgvector tests skip unless `TEST_DATABASE_URL` points at a dedicated database whose name includes `test` (never `enterprise_ai`):
+
+```bash
+TEST_DATABASE_URL='postgresql+psycopg://USER:PASSWORD@127.0.0.1:5432/enterprise_ai_acl_test' pytest backend/tests/test_retrieval_postgres.py
+```
