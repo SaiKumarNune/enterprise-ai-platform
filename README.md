@@ -320,16 +320,27 @@ Example pending response (abridged): `status=pending_approval` only after the va
 2. Incomplete leave: `POST /agents/run` with `Review the vacation policy and prepare an approval request for three days off.` Expect `needs_clarification` plus `missing_reason` and `missing_dates` when the policy requires those fields.
 3. Over-limit leave: `POST /agents/run` with `Review the vacation policy and prepare an approval request for 25 days off.` Expect `needs_clarification` and `days_exceed_policy`. A complete 3-day request with reason and dates within the parsed annual cap can reach `pending_approval`.
 
+## Observability
+
+JSON request logs go to stdout (`LOG_JSON=true`). Each line includes `ts`, `level`, `service`, `event`, `request_id`, `method`, `route` (path template), `status`, and `duration_ms`. Incoming `X-Request-ID` is echoed when it matches `[A-Za-z0-9._-]{1,128}`; otherwise a UUID is generated. Logs never include Authorization headers, JWTs, passwords, prompts, embeddings, document text, or connection strings.
+
+`GET /metrics` is Prometheus text. `METRICS_ENABLED` defaults to false in code; `.env.example` turns it on for local scrapes. Set `METRICS_TOKEN` in any shared environment so scrapes must send `Authorization: Bearer`. Labels are method, route template, status, retrieval mode, and coarse outcomes — never user, tenant, document, query, or workflow IDs.
+
+`GET /health` and `GET /health/live` are unauthenticated liveness checks (no PostgreSQL, Ollama, or embedder). `GET /health/ready` and `GET /db-health` run `SELECT 1` against PostgreSQL and return `503` without connection details. They are unauthenticated so load balancers can scrape them; do not expose them on a public network without an edge allowlist.
+
 ## Run tests
 
 ```bash
-pytest
+python3 -m pytest
 ```
 
-Tests use a fake embedder, an in-memory session, and temporary directories. They do not use development PostgreSQL and they do not download the MiniLM model. Agent tests authenticate with JWT secrets set only in the pytest process.
+Default tests use a fake embedder, an in-memory session, and temporary directories. They do not use development PostgreSQL (`enterprise_ai`) and they do not download the MiniLM model. Agent tests authenticate with JWT secrets set only in the pytest process.
 
-Isolated PostgreSQL FTS/pgvector tests skip unless `TEST_DATABASE_URL` points at a dedicated database whose name includes `test` (never `enterprise_ai`):
+Isolated PostgreSQL tests require a **separate** database whose name ends in `_test` (recommended: `enterprise_ai_acl_test`). They refuse `enterprise_ai`. Create it once (this does not drop or truncate development data):
 
 ```bash
-TEST_DATABASE_URL='postgresql+psycopg://USER:PASSWORD@127.0.0.1:5432/enterprise_ai_acl_test' pytest backend/tests/test_retrieval_postgres.py
+PYTHONPATH=backend python3 -m tests.ensure_test_database
+TEST_DATABASE_URL='postgresql+psycopg://USER:PASSWORD@127.0.0.1:5432/enterprise_ai_acl_test' python3 -m pytest
 ```
+
+The fixture may drop/recreate **tables inside the test database only**. It never runs against `enterprise_ai`. In-memory HTTP tests do not prove live SQL JOIN/FTS ACL behavior.

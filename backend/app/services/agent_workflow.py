@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.metrics import observe_workflow
 from app.models.workflow import AgentWorkflow
 from app.services.agent_graph import CLARIFICATION_ANSWER, compile_agent_graph
 from app.services.audit import record_audit
@@ -59,6 +61,8 @@ def run_agent_workflow(
     db.add(workflow)
     db.commit()
     graph = compile_agent_graph(db, embedder, llm, principal)
+    started = time.perf_counter()
+    outcome = "error"
     initial = {
         "workflow_id": str(workflow.id),
         "request": request,
@@ -81,10 +85,14 @@ def run_agent_workflow(
         workflow.updated_at = datetime.now(timezone.utc)
         db.commit()
         raise
-    _apply_state(workflow, state)
-    db.commit()
-    db.refresh(workflow)
-    return workflow
+    else:
+        _apply_state(workflow, state)
+        db.commit()
+        db.refresh(workflow)
+        outcome = workflow.status or "success"
+        return workflow
+    finally:
+        observe_workflow(outcome, time.perf_counter() - started)
 
 
 def get_agent_workflow(db: Session, workflow_id: UUID) -> AgentWorkflow:

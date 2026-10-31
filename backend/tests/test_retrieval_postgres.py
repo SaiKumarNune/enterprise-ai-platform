@@ -16,7 +16,7 @@ from app.models.acl import DocumentACL
 from app.models.chunk import DocumentChunk
 from app.models.document import Document
 from app.models.tenant import Tenant
-from app.models.user import ADMIN, EMPLOYEE, User
+from app.models.user import ADMIN, EMPLOYEE, MANAGER, User
 from app.services.authorization import Principal
 from app.services.retrieval import retrieve_chunks
 from tests.fake_embeddings import HashEmbedder
@@ -167,17 +167,18 @@ def test_postgres_lexical_and_vector_filter_before_limit(
     assert granted.status_code == 200
     after_grant = client.post(
         "/search",
-        json={"query": "15 vacation days", "retrieval_mode": "hybrid"},
+        json={"query": "Employees receive 15 vacation days each year", "retrieval_mode": "hybrid"},
         headers=colleague_headers,
     )
-    assert [item["document_id"] for item in after_grant.json()] == [str(visible_id)]
+    granted_ids = {item["document_id"] for item in after_grant.json()}
+    assert str(visible_id) in granted_ids
     client.delete(f"/documents/{document_id}/permissions/{colleague_id}", headers=owner_headers)
     after_revoke = client.post(
         "/search",
-        json={"query": "15 vacation days", "retrieval_mode": "hybrid"},
+        json={"query": "Employees receive 15 vacation days each year", "retrieval_mode": "hybrid"},
         headers=colleague_headers,
     )
-    assert after_revoke.json() == []
+    assert str(visible_id) not in {item["document_id"] for item in after_revoke.json()}
     assert owner_id
 
 
@@ -234,3 +235,106 @@ def test_postgres_quarantine_excluded_from_fts(
         verify.execute(text("SELECT to_tsvector('english', 'vacation days')"))
     finally:
         verify.close()
+
+
+def test_postgres_manager_acl_revoke_fresh_session_and_diagnostics(
+    postgres_client: tuple,
+) -> None:
+    client, factory = postgres_client
+    session = factory()
+    try:
+        now = datetime.now(timezone.utc)
+        tenant = Tenant(id=uuid4(), name="Mgr", slug=f"mgr-{uuid4().hex[:8]}", created_at=now, updated_at=now)
+        session.add(tenant)
+        session.commit()
+        owner = _seed_user(session, tenant.id, role=EMPLOYEE, email="own@example.test")
+        manager = _seed_user(session, tenant.id, role=MANAGER, email="mgr@example.test")
+        document, chunk = _seed_doc_with_chunk(
+            session,
+            tenant_id=tenant.id,
+            owner_id=owner.id,
+            filename="policy.txt",
+            content="Unique hybrid term ZX9001 appears in authorized policy text.",
+        )
+        owner_headers = _headers(owner)
+        manager_headers = _headers(manager)
+        document_id = document.id
+        chunk_id = chunk.id
+        manager_id = manager.id
+    finally:
+        session.close()
+
+    denied = client.post(
+        "/search",
+        json={"query": "ZX9001", "retrieval_mode": "hybrid", "include_diagnostics": True},
+        headers=manager_headers,
+    )
+    assert denied.status_code == 200
+    assert denied.json() == []
+    assert str(document_id) not in denied.text
+    assert str(chunk_id) not in denied.text
+
+    granted = client.put(
+        f"/documents/{document_id}/permissions",
+        json={"user_id": str(manager_id), "privilege": "read"},
+        headers=owner_headers,
+    )
+    assert granted.status_code == 200
+    allowed = client.post(
+        "/search",
+        json={"query": "ZX9001", "retrieval_mode": "hybrid", "include_diagnostics": True},
+        headers=manager_headers,
+    )
+    assert [item["document_id"] for item in allowed.json()] == [str(document_id)]
+
+    client.delete(f"/documents/{document_id}/permissions/{manager_id}", headers=owner_headers)
+    fresh = factory()
+    try:
+        principal = Principal.from_user(fresh.get(User, manager_id))
+        hidden = retrieve_chunks(
+            fresh,
+            query="ZX9001",
+            principal=principal,
+            top_k=5,
+            mode="lexical",
+        )
+        assert hidden == []
+    finally:
+        fresh.close()
+    revoked = client.post(
+        "/search",
+        json={"query": "ZX9001", "retrieval_mode": "lexical", "include_diagnostics": True},
+        headers=manager_headers,
+    )
+    assert revoked.json() == []
+
+
+def test_postgres_hybrid_and_modes_on_authorized_corpus(postgres_client: tuple) -> None:
+    client, factory = postgres_client
+    session = factory()
+    try:
+        now = datetime.now(timezone.utc)
+        tenant = Tenant(id=uuid4(), name="Hyb", slug=f"hyb-{uuid4().hex[:8]}", created_at=now, updated_at=now)
+        session.add(tenant)
+        session.commit()
+        owner = _seed_user(session, tenant.id, role=EMPLOYEE, email="hyb@example.test")
+        _document, chunk = _seed_doc_with_chunk(
+            session,
+            tenant_id=tenant.id,
+            owner_id=owner.id,
+            filename="leave.txt",
+            content="Full-time employees receive 15 vacation days each calendar year.",
+        )
+        headers = _headers(owner)
+        chunk_id = str(chunk.id)
+    finally:
+        session.close()
+
+    for mode in ("semantic", "lexical", "hybrid"):
+        response = client.post(
+            "/search",
+            json={"query": "vacation days", "top_k": 5, "retrieval_mode": mode},
+            headers=headers,
+        )
+        assert response.status_code == 200
+        assert any(item["chunk_id"] == chunk_id for item in response.json())

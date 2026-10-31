@@ -295,19 +295,25 @@ def test_disabled_user_cannot_read_own_document() -> None:
 
 
 def test_register_ignores_client_supplied_tenant() -> None:
+    from app.core.config import settings
+    from app.services.legacy_backfill import GREENFIELD_TENANT_ID
+
     session = FakeSession()
     _override_db(session)
+    spoofed = str(uuid.uuid4())
     try:
         response = client.post(
             "/auth/register",
             json={
                 "email": "tenant-spoof@example.com",
                 "password": "correct-horse-battery",
-                "tenant_id": str(uuid.uuid4()),
+                "tenant_id": spoofed,
             },
         )
     finally:
         _clear_overrides()
 
     assert response.status_code == 201
-    assert response.json()["tenant_id"] == "00000000-0000-4000-8000-000000000001"
+    expected = settings.default_tenant_id.strip() or str(GREENFIELD_TENANT_ID)
+    assert response.json()["tenant_id"] == expected
+    assert response.json()["tenant_id"] != spoofed

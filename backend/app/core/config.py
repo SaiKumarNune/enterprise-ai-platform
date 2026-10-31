@@ -40,6 +40,9 @@ class Settings:
     jwt_algorithm: str
     jwt_expire_minutes: int
     default_tenant_id: str
+    log_json: bool
+    metrics_enabled: bool
+    metrics_token: str = field(repr=False, default="")
 
     @property
     def database_url(self) -> str:
@@ -87,6 +90,9 @@ def _load_settings() -> Settings:
         jwt_algorithm=os.getenv("JWT_ALGORITHM", "HS256"),
         jwt_expire_minutes=int(os.getenv("JWT_EXPIRE_MINUTES", "60")),
         default_tenant_id=os.getenv("DEFAULT_TENANT_ID", ""),
+        log_json=os.getenv("LOG_JSON", "true").strip().lower() in {"1", "true", "yes"},
+        metrics_enabled=os.getenv("METRICS_ENABLED", "false").strip().lower() in {"1", "true", "yes"},
+        metrics_token=os.getenv("METRICS_TOKEN", ""),
     )
 
 

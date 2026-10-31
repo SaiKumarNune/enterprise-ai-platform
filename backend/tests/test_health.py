@@ -13,6 +13,9 @@ def test_health_returns_healthy_status() -> None:
         "status": "healthy",
         "service": "enterprise-ai-platform",
     }
+    live = client.get("/health/live")
+    assert live.status_code == 200
+    assert live.json() == response.json()
 
 
 def test_docs_returns_http_200() -> None:

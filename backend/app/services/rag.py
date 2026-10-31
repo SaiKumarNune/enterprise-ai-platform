@@ -9,6 +9,8 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.logging import log_event
+from app.core.metrics import observe_llm, observe_rag
 from app.models.chunk import DocumentChunk
 from app.services.embeddings import EmbeddingBackend
 from app.services.llm import LLMBackend
@@ -110,6 +112,7 @@ def answer_question(
     started = time.perf_counter()
     error_type: str | None = None
     retrieval_count = 0
+    outcome = "error"
     try:
         selected, sources, retrieval_count, used_mode = retrieve_evidence(
             db,
@@ -121,13 +124,22 @@ def answer_question(
             retrieval_mode=retrieval_mode,
         )
         if not selected:
+            outcome = "abstained"
             return _insufficient(retrieval_count, used_mode)
         user_prompt = build_user_prompt(question, selected)
-        raw_answer = llm.generate(SYSTEM_PROMPT, user_prompt)
+        llm_started = time.perf_counter()
+        llm_outcome = "error"
+        try:
+            raw_answer = llm.generate(SYSTEM_PROMPT, user_prompt)
+            llm_outcome = "success"
+        finally:
+            observe_llm(llm_outcome, time.perf_counter() - llm_started)
         check = inspect_answer(raw_answer, {source.source_id for source in sources})
         if check.abstained:
+            outcome = "abstained"
             return _insufficient(retrieval_count, used_mode)
 
+        outcome = "grounded" if check.grounded else "ungrounded"
         return RagAnswer(
             answer=check.cleaned_answer,
             sources=sources_for_citations(sources, check.citation_ids),
@@ -143,11 +155,14 @@ def answer_question(
         raise
     finally:
         duration_ms = int((time.perf_counter() - started) * 1000)
-        logger.info(
-            "rag_ask duration_ms=%s retrieval_count=%s error_type=%s",
-            duration_ms,
-            retrieval_count,
-            error_type,
+        observe_rag(outcome, time.perf_counter() - started)
+        log_event(
+            logger,
+            "rag_ask",
+            duration_ms=duration_ms,
+            retrieval_count=retrieval_count,
+            error_type=error_type,
+            outcome=outcome,
         )
 
 

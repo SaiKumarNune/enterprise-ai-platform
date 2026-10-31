@@ -3,6 +3,8 @@ import os
 os.environ["JWT_SECRET"] = "pytest-only-jwt-secret-key-not-for-prod"
 os.environ.setdefault("DEFAULT_TENANT_ID", "00000000-0000-4000-8000-000000000001")
 os.environ.setdefault("RETRIEVAL_MODE", "hybrid")
+os.environ.setdefault("METRICS_ENABLED", "true")
+os.environ.setdefault("LOG_JSON", "true")
 
 import pytest
 

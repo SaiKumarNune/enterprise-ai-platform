@@ -11,7 +11,19 @@ router = APIRouter()
 @router.get("/health")
 def health() -> dict[str, str]:
     """Liveness check used by local development and future load balancers."""
+    return live()
+
+
+@router.get("/health/live")
+def live() -> dict[str, str]:
+    """Process liveness. Does not call PostgreSQL, Ollama, or the embedder."""
     return {"status": "healthy", "service": settings.service_name}
+
+
+@router.get("/health/ready")
+def ready(db: Session = Depends(get_db)) -> dict[str, str]:
+    """PostgreSQL readiness. Unauthenticated for load balancers; no connection details."""
+    return db_health(db)
 
 
 @router.get("/db-health")

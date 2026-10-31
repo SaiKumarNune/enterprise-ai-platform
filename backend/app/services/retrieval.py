@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import re
+import time
 from collections import Counter
 from dataclasses import dataclass
 from typing import Literal
@@ -25,6 +26,7 @@ from app.services.authorization import (
     authorized_document_ids,
     require_document,
 )
+from app.core.metrics import observe_retrieval
 from app.services.rrf import DEFAULT_RRF_K, reciprocal_rank_fusion
 
 SEMANTIC = "semantic"
@@ -113,6 +115,38 @@ def retrieve_chunks(
     resolved = normalize_retrieval_mode(mode)
     pool = max(top_k, candidate_pool or settings.retrieval_candidate_pool)
     k = rrf_k or settings.rrf_k or DEFAULT_RRF_K
+    started = time.perf_counter()
+    outcome = "error"
+    try:
+        hits = _retrieve_chunks(
+            db,
+            query=query,
+            principal=principal,
+            top_k=top_k,
+            resolved=resolved,
+            query_embedding=query_embedding,
+            document_id=document_id,
+            pool=pool,
+            k=k,
+        )
+        outcome = "empty" if not hits else "success"
+        return hits
+    finally:
+        observe_retrieval(resolved, outcome, time.perf_counter() - started)
+
+
+def _retrieve_chunks(
+    db: Session,
+    *,
+    query: str,
+    principal: Principal,
+    top_k: int,
+    resolved: str,
+    query_embedding: list[float] | None,
+    document_id: UUID | None,
+    pool: int,
+    k: int,
+) -> list[RetrievalHit]:
     if resolved == SEMANTIC:
         rows = _semantic_rows(
             db,
