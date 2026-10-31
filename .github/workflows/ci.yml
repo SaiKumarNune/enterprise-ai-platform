@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # Application name used by the isolation guard. Must differ from the test DB.
+      POSTGRES_DB: enterprise_ai
+      POSTGRES_USER: ci_user
+      POSTGRES_PASSWORD: ci_test_password_not_for_prod
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      JWT_SECRET: ci-only-jwt-secret-key-not-for-production-use
+      TEST_DATABASE_URL: postgresql+psycopg://ci_user:ci_test_password_not_for_prod@localhost:5432/enterprise_ai_acl_test
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: ci_user
+          POSTGRES_PASSWORD: ci_test_password_not_for_prod
+          # Official image creates this database on first boot.
+          POSTGRES_DB: enterprise_ai_acl_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci_user -d enterprise_ai_acl_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Ensure isolated test database exists
+        run: |
+          python - <<'PY'
+          import os
+
+          from sqlalchemy import create_engine, text
+          from sqlalchemy.pool import NullPool
+
+          user = os.environ["POSTGRES_USER"]
+          password = os.environ["POSTGRES_PASSWORD"]
+          host = os.environ["POSTGRES_HOST"]
+          port = os.environ["POSTGRES_PORT"]
+          test_db = "enterprise_ai_acl_test"
+          admin_url = f"postgresql+psycopg://{user}:{password}@{host}:{port}/postgres"
+          engine = create_engine(admin_url, isolation_level="AUTOCOMMIT", poolclass=NullPool)
+          try:
+              with engine.connect() as connection:
+                  exists = connection.execute(
+                      text("SELECT 1 FROM pg_database WHERE datname = :name"),
+                      {"name": test_db},
+                  ).scalar()
+                  if not exists:
+                      connection.execute(text(f'CREATE DATABASE "{test_db}" TEMPLATE template0'))
+          finally:
+              engine.dispose()
+          print("isolated test database ready: enterprise_ai_acl_test")
+          PY
+
+      - name: Run pytest without skips
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -q --tb=short -rs -rA | tee pytest-output.txt
+          if grep -Eq '[0-9]+ skipped' pytest-output.txt; then
+            echo 'CI failed: skipped tests detected.'
+            exit 1
+          fi
