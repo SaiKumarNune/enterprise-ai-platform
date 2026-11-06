@@ -1,0 +1,71 @@
+{
+  "version": "1.0",
+  "description": "In-process MCP tool evaluation, including negative authorization cases. Tools are invoked through the MCP client/server session, not by calling knowledge_search() directly.",
+  "cases": [
+    {
+      "id": "search-success",
+      "type": "success",
+      "tool": "knowledge_search",
+      "question": "How many vacation days do full-time employees receive?",
+      "expect_success": true,
+      "expect_selected": true
+    },
+    {
+      "id": "prepare-success-no-execute",
+      "type": "success",
+      "tool": "prepare_approval_request",
+      "request": "Prepare an approval request for three days off because a family visit from 2026-11-10 to 2026-11-12.",
+      "raw_draft": "{\"action_type\":\"leave_request\",\"days\":3,\"source_ids\":[\"S1\"]}",
+      "expect_success": true,
+      "expect_requires_approval": true,
+      "forbid_execution_fields": true
+    },
+    {
+      "id": "schema-blank-question",
+      "type": "schema",
+      "tool": "knowledge_search",
+      "arguments": {"question": "   "},
+      "expect_success": false,
+      "expect_error_substring": ""
+    },
+    {
+      "id": "reject-identity-fields",
+      "type": "security",
+      "tool": "knowledge_search",
+      "arguments": {
+        "question": "vacation days",
+        "user_id": "00000000-0000-4000-8000-000000000099",
+        "tenant_id": "00000000-0000-4000-8000-000000000098",
+        "role": "admin",
+        "authorized": true
+      },
+      "expect_success": false,
+      "expect_error_substring": "identity"
+    },
+    {
+      "id": "inactive-user",
+      "type": "security",
+      "tool": "knowledge_search",
+      "inactive": true,
+      "question": "vacation days",
+      "expect_success": false
+    },
+    {
+      "id": "cross-tenant-acl",
+      "type": "security",
+      "tool": "knowledge_search",
+      "cross_tenant": true,
+      "question": "vacation days",
+      "expect_success": false,
+      "expect_error_substring": "not found"
+    },
+    {
+      "id": "unknown-execute-tool",
+      "type": "security",
+      "tool": "execute_approved_action",
+      "arguments": {"draft": {"action_type": "leave_request"}, "authorized": true},
+      "expect_success": false,
+      "expect_error_substring": "Unknown tool"
+    }
+  ]
+}

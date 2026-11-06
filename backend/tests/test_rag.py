@@ -12,6 +12,7 @@ from app.services.rag import (
     build_user_prompt,
     dedupe_chunks,
     inspect_answer,
+    keep_sufficient_evidence,
     parse_citation_ids,
     sanitize_answer,
     select_context,
@@ -315,6 +316,70 @@ def test_rag_ask_validates_input_and_missing_document() -> None:
     assert blank.status_code == 422
     assert too_large.status_code == 422
     assert missing.status_code == 404
+
+
+def test_keep_sufficient_evidence_drops_unrelated_retrieved_chunks() -> None:
+    document = _sample_document()
+    vacation = _chunk(document.id, 0, "Full-time employees receive 15 vacation days each calendar year.")
+    sick = _chunk(document.id, 1, "Employees may take 10 paid sick days each year.")
+    kept = keep_sufficient_evidence(
+        "How is the retirement matching formula determined?",
+        [(vacation, 0.91), (sick, 0.88)],
+    )
+    assert kept == []
+
+
+def test_keep_sufficient_evidence_retains_relevant_chunks() -> None:
+    document = _sample_document()
+    vacation = _chunk(document.id, 0, "Full-time employees receive 15 vacation days each calendar year.")
+    cafeteria = _chunk(document.id, 1, "The cafeteria menu changes on Fridays.")
+    kept = keep_sufficient_evidence(
+        "What is the annual vacation allotment for full-time staff?",
+        [(vacation, 0.42), (cafeteria, 0.39)],
+    )
+    assert [chunk.id for chunk, _score in kept] == [vacation.id]
+
+
+def test_keep_sufficient_evidence_keeps_only_supporting_chunk_when_mixed() -> None:
+    document = _sample_document()
+    leave = _chunk(document.id, 0, "Unused vacation days do not carry over to the next calendar year.")
+    badge = _chunk(document.id, 1, "Lost badges must be reported to security within 2 hours.")
+    kept = keep_sufficient_evidence(
+        "How must lost badges be reported?",
+        [(leave, 0.77), (badge, 0.61)],
+    )
+    assert [chunk.id for chunk, _score in kept] == [badge.id]
+
+
+def test_rag_ask_abstains_when_retrieved_chunks_do_not_support_question() -> None:
+    document = _sample_document("policy.txt")
+    session = FakeSession(documents=[document])
+    session.chunks = [
+        _chunk(document.id, 0, "Full-time employees receive 15 vacation days each calendar year."),
+        _chunk(document.id, 1, "Employees may take 10 paid sick days each year."),
+    ]
+    llm = ScriptedLLM("should not be called")
+    app.dependency_overrides[get_llm] = lambda: llm
+    _override_db(session)
+    _user, headers = auth_headers(session)
+    try:
+        response = client.post(
+            "/rag/ask",
+            json={
+                "question": "How is the retirement matching formula determined?",
+                "document_id": str(document.id),
+            },
+            headers=headers,
+        )
+    finally:
+        _clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["answer"] == INSUFFICIENT_ANSWER
+    assert body["abstained"] is True
+    assert body["sources"] == []
+    assert llm.calls == []
 
 
 def test_select_context_applies_similarity_threshold() -> None:

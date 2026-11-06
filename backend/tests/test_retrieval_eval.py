@@ -21,5 +21,7 @@ def test_synthetic_retrieval_eval_compares_three_modes() -> None:
         item for item in report["cases"]["lexical"] if item["case_id"] == "rare-identifier"
     )
     assert identifier["recall_at_k"] == 1.0
-    assert "HashEmbedder" in report["limitations"]
-    assert "not BM25" in report["limitations"]
+    limitations = report["limitations"]
+    blob = limitations if isinstance(limitations, str) else " ".join(limitations)
+    assert "HashEmbedder" in blob
+    assert "not BM25" in blob

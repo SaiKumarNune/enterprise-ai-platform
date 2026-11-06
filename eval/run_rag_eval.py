@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Offline RAG evaluation using synthetic documents.
+"""RAG evaluation using synthetic documents.
 
 Default mode uses fake embeddings and a scripted LLM. It does not connect to
 PostgreSQL, Ollama, or download MiniLM.
 
-Live integration mode is opt-in and documented; this runner does not enable it.
+Live mode is explicit: --mode live. It never falls back to HashEmbedder or
+DatasetLLM. If MiniLM, Ollama, or an isolated eval database is missing, the
+runner records status=not_run and exits 2.
 """
 
 from __future__ import annotations
@@ -15,24 +17,36 @@ import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BACKEND = ROOT / "backend"
-if str(BACKEND) not in sys.path:
-    sys.path.insert(0, str(BACKEND))
+for path in (str(ROOT), str(BACKEND)):
+    if path not in sys.path:
+        sys.path.insert(0, path)
 
-from app.models.chunk import DocumentChunk  # noqa: E402
-from app.models.document import Document  # noqa: E402
 from app.services.authorization import Principal  # noqa: E402
 from app.services.rag import INSUFFICIENT_ANSWER, answer_question  # noqa: E402
 from app.services.retrieval import retrieve_chunks  # noqa: E402
-from tests.auth_helpers import own_session_documents, seed_user  # noqa: E402
+from eval.corpus import load_fake_corpus, load_sql_corpus, seed_sql_owner  # noqa: E402
+from eval.live import not_run_report, probe_live_environment  # noqa: E402
+from eval.metrics import claim_coverage, citation_precision, mean, mrr, recall_at_k  # noqa: E402
+from eval.reporting import compare_baseline, load_json, write_report  # noqa: E402
 from tests.fake_embeddings import HashEmbedder  # noqa: E402
-from tests.test_documents import FakeSession  # noqa: E402
 
 DATASET = Path(__file__).resolve().parent / "datasets" / "rag_quality_v1.json"
+
+METRIC_DEFINITIONS = {
+    "recall_at_k": "Fraction of gold chunk IDs present in the top_k retrieved chunks. Null when no gold IDs.",
+    "mrr": "Mean reciprocal rank of the first gold chunk. Null when no gold IDs.",
+    "citation_validity_rate": "Share of generated answers whose remaining citations map to retrieved source IDs.",
+    "citation_precision": "Share of cited chunks that are gold evidence chunks. Null when nothing is cited.",
+    "abstention_accuracy": "Share of cases where abstention matched expect_abstain.",
+    "answer_claim_coverage": "Deterministic substring coverage of reference_claims in the generated answer. Not NLI.",
+    "evidence_claim_coverage": "Deterministic substring coverage of reference_claims in retrieved chunk text.",
+    "mean_latency_ms": "Mean wall-clock time per case.",
+    "llm_judge_faithfulness": "Optional live-only LLM-as-judge score. Labeled heuristic, not a pass/fail gate.",
+}
 
 
 @dataclass
@@ -40,12 +54,20 @@ class CaseResult:
     case_id: str
     case_type: str
     recall_at_k: float | None
+    mrr: float | None
     cited_valid_ids: bool | None
+    citation_precision: float | None
     abstained: bool
     expected_abstain: bool
     abstain_match: bool
+    answer_claim_coverage: float | None
+    evidence_claim_coverage: float | None
     latency_ms: int
     injection_blocked: bool | None
+    llm_judge_faithful: bool | None
+    expected: dict
+    observed: dict
+    passed: bool
 
 
 class DatasetLLM:
@@ -56,6 +78,10 @@ class DatasetLLM:
             return INSUFFICIENT_ANSWER
         if "PWNED" in user_prompt and "lost badges" in user_prompt.lower():
             return "Lost badges must be reported to security within 2 hours [S1]."
+        if "15 vacation days" in user_prompt:
+            return "Full-time employees receive 15 vacation days each calendar year [S1]."
+        if "doctor's note" in user_prompt.lower() or "sick days" in user_prompt.lower():
+            return "A doctor's note is required after three consecutive sick days [S1]."
         return "The retrieved policy excerpt supports a concise answer [S1]."
 
 
@@ -63,62 +89,133 @@ def load_dataset(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def build_session(dataset: dict, embedder: HashEmbedder) -> tuple[FakeSession, dict[str, uuid.UUID], dict[str, uuid.UUID]]:
-    document_ids: dict[str, uuid.UUID] = {}
-    chunk_ids: dict[str, uuid.UUID] = {}
-    documents: list[Document] = []
-    chunks: list[DocumentChunk] = []
-    now = datetime.now(timezone.utc)
-    for doc in dataset["documents"]:
-        document_id = uuid.uuid4()
-        document_ids[doc["id"]] = document_id
-        documents.append(
-            Document(
-                id=document_id,
-                filename=doc["filename"],
-                content_type="text/plain",
-                status="ready",
-                created_at=now,
-                updated_at=now,
-            )
-        )
-        for index, chunk in enumerate(doc["chunks"]):
-            chunk_uuid = uuid.uuid4()
-            chunk_ids[chunk["id"]] = chunk_uuid
-            content = chunk["content"]
-            chunks.append(
-                DocumentChunk(
-                    id=chunk_uuid,
-                    document_id=document_id,
-                    chunk_index=index,
-                    content=content,
-                    page_number=chunk.get("page_number"),
-                    created_at=now,
-                    embedding=embedder.embed_texts([content])[0],
-                )
-            )
-    session = FakeSession(documents=documents)
-    session.chunks = chunks
-    owner = seed_user(session)
-    own_session_documents(session, owner)
-    return session, document_ids, chunk_ids, owner
-
-
-def recall_at_k(retrieved: list[uuid.UUID], gold: list[uuid.UUID]) -> float | None:
-    if not gold:
-        return None
-    hits = len(set(retrieved) & set(gold))
-    return hits / len(gold)
-
-
-def run_eval(dataset_path: Path, top_k: int) -> dict:
+def run_eval(dataset_path: Path, top_k: int, *, mode: str = "offline_mock", llm_judge: bool = False) -> dict:
+    if mode == "live":
+        return run_live_eval(dataset_path, top_k, llm_judge=llm_judge)
+    if mode not in {"offline_mock", "offline"}:
+        raise ValueError("mode must be offline_mock or live")
     dataset = load_dataset(dataset_path)
     embedder = HashEmbedder()
     llm = DatasetLLM()
-    session, document_ids, chunk_ids, owner = build_session(dataset, embedder)
+    session, document_ids, chunk_ids, owner = load_fake_corpus(dataset, embedder)
+    report = _evaluate_cases(
+        dataset=dataset,
+        session=session,
+        embedder=embedder,
+        llm=llm,
+        owner=owner,
+        document_ids=document_ids,
+        chunk_ids=chunk_ids,
+        top_k=top_k,
+        llm_judge=False,
+    )
+    report.update(
+        {
+            "title": "RAG evaluation",
+            "dataset": dataset_path.name,
+            "dataset_version": dataset.get("version"),
+            "mode": "offline_mock",
+            "embedder": "HashEmbedder",
+            "llm": "DatasetLLM",
+            "top_k": top_k,
+            "metric_definitions": METRIC_DEFINITIONS,
+            "limitations": [
+                "Offline mock mode does not call Ollama or PostgreSQL.",
+                "HashEmbedder is not MiniLM; paraphrase recall can collapse.",
+                "answer_claim_coverage is substring matching, not proven faithfulness.",
+            ],
+            "notes": [
+                "These checks are deterministic heuristics, not human answer-quality scores.",
+                "Valid citations are not proof that an answer is factually correct.",
+            ],
+        }
+    )
+    report["passed"] = all(case["passed"] for case in report["cases"])
+    report["status"] = "completed"
+    return report
+
+
+def run_live_eval(dataset_path: Path, top_k: int, *, llm_judge: bool) -> dict:
+    dataset = load_dataset(dataset_path)
+    probe = probe_live_environment(require_llm=True)
+    if not probe.ready:
+        report = not_run_report(
+            title="RAG evaluation",
+            dataset_version=str(dataset.get("version")),
+            reason=probe.reason,
+        )
+        report["dataset"] = dataset_path.name
+        report["metric_definitions"] = METRIC_DEFINITIONS
+        return report
+    from app.services.embeddings import SentenceTransformerEmbedder
+    from app.services.llm import OllamaChatClient
+    from eval.store import close_isolated, isolated_session_factory
+
+    embedder = SentenceTransformerEmbedder(probe.embedder_id, 384)
+    llm = OllamaChatClient(
+        base_url=__import__("os").getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
+        model=probe.llm_id,
+        timeout_seconds=60,
+    )
+    factory, engine = isolated_session_factory(probe.database_url)
+    try:
+        session = factory()
+        try:
+            owner = seed_sql_owner(session)
+            document_ids, chunk_ids = load_sql_corpus(session, dataset, embedder, owner)
+            session.commit()
+            report = _evaluate_cases(
+                dataset=dataset,
+                session=session,
+                embedder=embedder,
+                llm=llm,
+                owner=owner,
+                document_ids=document_ids,
+                chunk_ids=chunk_ids,
+                top_k=top_k,
+                llm_judge=llm_judge,
+            )
+        finally:
+            session.close()
+    finally:
+        close_isolated(engine)
+    report.update(
+        {
+            "title": "RAG evaluation",
+            "dataset": dataset_path.name,
+            "dataset_version": dataset.get("version"),
+            "mode": "live",
+            "embedder": probe.embedder_id,
+            "llm": probe.llm_id,
+            "top_k": top_k,
+            "metric_definitions": METRIC_DEFINITIONS,
+            "limitations": [
+                "Live metrics are not comparable to HashEmbedder mock scores.",
+                "LLM-as-judge is optional, labeled, and excluded from default regression gates.",
+                f"Isolated database {probe.database_name} was used; development enterprise_ai was not mutated.",
+            ],
+            "notes": ["Live mode used MiniLM embeddings, PostgreSQL retrieval, and Ollama generation."],
+        }
+    )
+    report["passed"] = all(case["passed"] for case in report["cases"])
+    report["status"] = "completed"
+    return report
+
+
+def _evaluate_cases(
+    *,
+    dataset: dict,
+    session,
+    embedder,
+    llm,
+    owner,
+    document_ids: dict[str, uuid.UUID],
+    chunk_ids: dict[str, uuid.UUID],
+    top_k: int,
+    llm_judge: bool,
+) -> dict:
     principal = Principal.from_user(owner)
     results: list[CaseResult] = []
-
     for case in dataset["cases"]:
         started = time.perf_counter()
         document_key = case.get("document_id")
@@ -144,100 +241,125 @@ def run_eval(dataset_path: Path, top_k: int) -> dict:
             document_id=document_uuid,
         )
         latency_ms = int((time.perf_counter() - started) * 1000)
+        cited_chunk_ids = []
+        source_by_id = {item.source_id: item.chunk_id for item in answer.sources}
+        for source in answer.sources:
+            cited_chunk_ids.append(source.chunk_id)
+        claims = list(case.get("reference_claims") or [])
+        evidence_text = " ".join(hit.chunk.content for hit in retrieved_hits)
         cited_valid = None if answer.abstained else answer.citation_valid
         injection_blocked = None
         forbidden = case.get("must_not_contain") or []
         if forbidden:
             injection_blocked = not any(token in answer.answer for token in forbidden)
-        results.append(
-            CaseResult(
-                case_id=case["id"],
-                case_type=case["type"],
-                recall_at_k=recall_at_k(retrieved_ids, gold),
-                cited_valid_ids=cited_valid,
-                abstained=answer.abstained,
-                expected_abstain=bool(case.get("expect_abstain")),
-                abstain_match=answer.abstained == bool(case.get("expect_abstain")),
-                latency_ms=latency_ms,
-                injection_blocked=injection_blocked,
-            )
+        expected_abstain = bool(case.get("expect_abstain"))
+        judge = None
+        if llm_judge and not answer.abstained:
+            judge = _llm_judge(llm, evidence_text, answer.answer)
+        passed = answer.abstained == expected_abstain
+        if injection_blocked is False:
+            passed = False
+        result = CaseResult(
+            case_id=case["id"],
+            case_type=case["type"],
+            recall_at_k=recall_at_k(retrieved_ids, gold),
+            mrr=mrr(retrieved_ids, gold),
+            cited_valid_ids=cited_valid,
+            citation_precision=citation_precision(cited_chunk_ids, gold) if cited_chunk_ids else None,
+            abstained=answer.abstained,
+            expected_abstain=expected_abstain,
+            abstain_match=answer.abstained == expected_abstain,
+            answer_claim_coverage=claim_coverage(answer.answer, claims),
+            evidence_claim_coverage=claim_coverage(evidence_text, claims),
+            latency_ms=latency_ms,
+            injection_blocked=injection_blocked,
+            llm_judge_faithful=judge,
+            expected={"abstain": expected_abstain, "gold_chunk_ids": case.get("gold_chunk_ids", [])},
+            observed={
+                "abstain": answer.abstained,
+                "citation_valid": cited_valid,
+                "source_ids": list(source_by_id),
+            },
+            passed=passed,
         )
-
-    recall_values = [item.recall_at_k for item in results if item.recall_at_k is not None]
+        results.append(result)
+    recall_values = [item.recall_at_k for item in results]
     citation_values = [item.cited_valid_ids for item in results if item.cited_valid_ids is not None]
+    judge_values = [item.llm_judge_faithful for item in results if item.llm_judge_faithful is not None]
     return {
-        "dataset": dataset_path.name,
-        "dataset_version": dataset.get("version"),
-        "mode": "offline_mock",
-        "top_k": top_k,
-        "metric_definitions": {
-            "recall_at_k": "Fraction of gold chunk IDs present in the top_k retrieved chunks. Null when no gold IDs.",
-            "citation_validity_rate": "Share of generated answers whose remaining citations map to retrieved source IDs.",
-            "abstention_accuracy": "Share of cases where abstention matched expect_abstain.",
-            "mean_latency_ms": "Mean wall-clock time per case in this mock runner.",
-        },
-        "notes": [
-            "These checks are deterministic heuristics, not human answer-quality scores.",
-            "Valid citations are not proof that an answer is factually correct.",
-            "Offline mock mode does not call Ollama or PostgreSQL.",
-        ],
         "aggregates": {
             "n_cases": len(results),
-            "recall_at_k": None if not recall_values else round(sum(recall_values) / len(recall_values), 4),
+            "recall_at_k": mean(recall_values),
+            "mrr": mean(item.mrr for item in results),
             "citation_validity_rate": None
             if not citation_values
             else round(sum(1 for value in citation_values if value) / len(citation_values), 4),
+            "citation_precision": mean(item.citation_precision for item in results),
             "abstention_accuracy": round(
                 sum(1 for item in results if item.abstain_match) / len(results),
                 4,
             ),
+            "answer_claim_coverage": mean(item.answer_claim_coverage for item in results),
+            "evidence_claim_coverage": mean(item.evidence_claim_coverage for item in results),
             "mean_latency_ms": round(sum(item.latency_ms for item in results) / len(results), 2),
+            "llm_judge_faithfulness": None
+            if not judge_values
+            else round(sum(1 for value in judge_values if value) / len(judge_values), 4),
         },
         "cases": [asdict(item) for item in results],
     }
 
 
+def _llm_judge(llm, evidence: str, answer: str) -> bool | None:
+    prompt = (
+        "You are an LLM-as-judge, not a source of ground truth. "
+        "Return JSON {\"faithful\": true or false}. faithful=true only if every "
+        "factual claim in ANSWER is supported by EVIDENCE.\n\n"
+        f"EVIDENCE:\n{evidence}\n\nANSWER:\n{answer}"
+    )
+    raw = llm.generate("Return JSON only.", prompt)
+    try:
+        payload = json.loads(raw[raw.find("{") : raw.rfind("}") + 1])
+    except (ValueError, json.JSONDecodeError):
+        return None
+    value = payload.get("faithful")
+    return bool(value) if isinstance(value, bool) else None
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run offline mock RAG evaluation.")
+    parser = argparse.ArgumentParser(description="Run RAG evaluation.")
     parser.add_argument("--dataset", type=Path, default=DATASET)
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--mode", choices=("offline_mock", "live"), default="offline_mock")
+    parser.add_argument("--llm-judge", action="store_true", help="Live-only LLM-as-judge (not a CI gate).")
+    parser.add_argument("--baseline", type=Path, default=None)
+    parser.add_argument(
+        "--max-drop",
+        action="append",
+        default=[],
+        metavar="METRIC=DELTA",
+        help="Deterministic regression drop, e.g. recall_at_k=0.15. Ignored for llm_judge_faithfulness.",
+    )
     args = parser.parse_args()
-    report = run_eval(args.dataset, args.top_k)
-    text = json.dumps(report, indent=2)
+    if args.mode != "live" and args.llm_judge:
+        raise SystemExit(" --llm-judge requires --mode live")
+    report = run_eval(args.dataset, args.top_k, mode=args.mode, llm_judge=args.llm_judge)
+    if args.baseline is not None and report.get("status") == "completed":
+        drops = {}
+        for item in args.max_drop:
+            key, value = item.split("=", 1)
+            drops[key] = float(value)
+        failures = compare_baseline(report, load_json(args.baseline), max_drop=drops)
+        report["baseline_failures"] = failures
+        if failures:
+            report["passed"] = False
+    text = write_report(report, args.output)
     print(text)
-    if args.output is not None:
-        if args.output.suffix.lower() == ".md":
-            args.output.write_text(_markdown_report(report), encoding="utf-8")
-        else:
-            args.output.write_text(text + "\n", encoding="utf-8")
-
-
-def _markdown_report(report: dict) -> str:
-    aggregates = report["aggregates"]
-    lines = [
-        f"# RAG eval: {report['dataset']}",
-        "",
-        f"Mode: `{report['mode']}` (version {report['dataset_version']}, top_k={report['top_k']})",
-        "",
-        "## Metrics",
-        "",
-        "| Metric | Value | Definition |",
-        "|---|---|---|",
-    ]
-    for key, definition in report["metric_definitions"].items():
-        lines.append(f"| {key} | {aggregates.get(key)} | {definition} |")
-    lines.extend(["", "## Notes", ""])
-    lines.extend(f"- {note}" for note in report["notes"])
-    lines.extend(["", "## Cases", ""])
-    for case in report["cases"]:
-        lines.append(
-            f"- `{case['case_id']}` ({case['case_type']}): "
-            f"recall@k={case['recall_at_k']}, citation_valid={case['cited_valid_ids']}, "
-            f"abstain={case['abstained']} expected={case['expected_abstain']}, "
-            f"{case['latency_ms']}ms"
-        )
-    return "\n".join(lines) + "\n"
+    if report.get("status") == "not_run":
+        raise SystemExit(2)
+    if args.baseline is not None and report.get("baseline_failures"):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

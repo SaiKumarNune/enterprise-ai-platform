@@ -16,6 +16,7 @@ from app.services.rag import (
     SYSTEM_PROMPT,
     build_user_prompt,
     inspect_answer,
+    keep_sufficient_evidence,
     source_dicts_for_citations,
 )
 
@@ -59,8 +60,19 @@ def synthesize_informational_answer(
     excerpts: list[dict[str, Any]],
     sources: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    selected = keep_sufficient_evidence(question, selected_from_excerpts(excerpts, sources))
+    if not selected:
+        return {
+            "answer": INSUFFICIENT_ANSWER,
+            "sources": [],
+            "draft": None,
+            "grounded": False,
+            "citation_valid": True,
+            "abstained": True,
+            "status": "completed",
+            "grounding_issues": [],
+        }
     valid_ids = {item["source_id"] for item in sources}
-    selected = selected_from_excerpts(excerpts, sources)
     raw_answer = llm.generate(SYSTEM_PROMPT, build_user_prompt(question, selected))
     check = inspect_answer(raw_answer, valid_ids)
     answer = check.cleaned_answer if not check.abstained else INSUFFICIENT_ANSWER

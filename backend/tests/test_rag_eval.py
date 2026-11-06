@@ -19,6 +19,9 @@ def test_offline_rag_eval_reports_defined_metrics() -> None:
     assert citation_rate is None or 0.0 <= citation_rate <= 1.0
     assert 0.0 <= report["aggregates"]["abstention_accuracy"] <= 1.0
     assert report["aggregates"]["mean_latency_ms"] >= 0
+    assert "mrr" in report["aggregates"]
+    assert "citation_precision" in report["aggregates"]
+    assert report["embedder"] == "HashEmbedder"
     injection = next(item for item in report["cases"] if item["case_id"] == "prompt-injection-badge")
     assert injection["injection_blocked"] is True
     unanswerable = next(item for item in report["cases"] if item["case_id"] == "unanswerable-pension")

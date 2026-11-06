@@ -1,0 +1,122 @@
+{
+  "version": "1.0",
+  "description": "LangGraph orchestration scenarios. Offline mode uses SequenceLLM; traces are structured outcomes, not chain-of-thought.",
+  "cases": [
+    {
+      "id": "informational-vacation",
+      "type": "informational",
+      "request": "How many vacation days do full-time employees receive?",
+      "policy": "default",
+      "llm_responses": [
+        "{\"intent\":\"informational\",\"tool\":\"knowledge_search\",\"action_type\":null}",
+        "Full-time employees receive 15 vacation days each year [S1]."
+      ],
+      "expected_status": "completed",
+      "expected_intent": "informational",
+      "expected_agents": ["planner", "research", "validator"],
+      "expect_draft": false,
+      "expect_execution": false
+    },
+    {
+      "id": "clarification-request",
+      "type": "clarification",
+      "request": "Tell me something about the policy but I am not sure what I need.",
+      "policy": "default",
+      "llm_responses": [
+        "{\"intent\":\"clarification\",\"tool\":\"knowledge_search\",\"action_type\":null}"
+      ],
+      "expected_status": "needs_clarification",
+      "expected_intent": "clarification",
+      "expected_agents": ["planner", "research", "validator"],
+      "expect_draft": false,
+      "expect_execution": false
+    },
+    {
+      "id": "valid-approval-draft",
+      "type": "valid_draft",
+      "request": "Review the vacation policy and prepare an approval request for three days off because a family visit. The start date is 2026-11-10 and the end date is 2026-11-12.",
+      "policy": "default",
+      "llm_responses": [
+        "{\"intent\":\"draft_action\",\"tool\":\"prepare_approval_request\",\"action_type\":\"leave_request\"}",
+        "{\"action_type\":\"leave_request\",\"days\":3,\"reason\":\"a family visit\",\"start_date\":\"2026-11-10\",\"end_date\":\"2026-11-12\",\"source_ids\":[\"S1\"]}"
+      ],
+      "expected_status": "pending_approval",
+      "expected_intent": "draft_action",
+      "expected_agents": ["planner", "research", "action", "validator"],
+      "expect_draft": true,
+      "expect_execution": false,
+      "expect_approval_gate": true
+    },
+    {
+      "id": "missing-required-information",
+      "type": "missing_information",
+      "request": "Review the vacation policy and prepare an approval request for three days off.",
+      "policy": "strict",
+      "llm_responses": [
+        "{\"intent\":\"draft_action\",\"tool\":\"prepare_approval_request\",\"action_type\":\"leave_request\"}",
+        "{\"action_type\":\"leave_request\",\"days\":3,\"source_ids\":[\"S1\"]}"
+      ],
+      "expected_status": "needs_clarification",
+      "expected_intent": "draft_action",
+      "expect_draft": false,
+      "expect_execution": false,
+      "expected_issue_codes": ["missing_reason", "missing_dates"]
+    },
+    {
+      "id": "policy-violation-over-limit",
+      "type": "policy_violation",
+      "request": "Review the vacation policy and prepare an approval request for 25 days off because a family visit from 2026-11-03 to 2026-11-28.",
+      "policy": "strict",
+      "llm_responses": [
+        "{\"intent\":\"draft_action\",\"tool\":\"prepare_approval_request\",\"action_type\":\"leave_request\"}",
+        "{\"action_type\":\"leave_request\",\"days\":25,\"reason\":\"a family visit\",\"start_date\":\"2026-11-03\",\"end_date\":\"2026-11-28\",\"source_ids\":[\"S1\"]}"
+      ],
+      "expected_status": "needs_clarification",
+      "expected_intent": "draft_action",
+      "expect_draft": false,
+      "expect_execution": false,
+      "expected_issue_codes": ["days_exceed_policy"]
+    },
+    {
+      "id": "unauthorized-cross-tenant",
+      "type": "unauthorized",
+      "request": "How many vacation days do full-time employees receive?",
+      "policy": "default",
+      "cross_tenant": true,
+      "llm_responses": [
+        "{\"intent\":\"informational\",\"tool\":\"knowledge_search\",\"action_type\":null}"
+      ],
+      "expected_error": "document_not_found",
+      "expect_execution": false
+    },
+    {
+      "id": "human-approval-simulated-execute",
+      "type": "approval",
+      "request": "Review the vacation policy and prepare an approval request for three days off because a family visit. The start date is 2026-11-10 and the end date is 2026-11-12.",
+      "policy": "default",
+      "followup": "approve",
+      "llm_responses": [
+        "{\"intent\":\"draft_action\",\"tool\":\"prepare_approval_request\",\"action_type\":\"leave_request\"}",
+        "{\"action_type\":\"leave_request\",\"days\":3,\"reason\":\"a family visit\",\"start_date\":\"2026-11-10\",\"end_date\":\"2026-11-12\",\"source_ids\":[\"S1\"]}"
+      ],
+      "expected_status": "completed",
+      "expect_draft": true,
+      "expect_execution": true,
+      "expect_simulated": true
+    },
+    {
+      "id": "human-rejection",
+      "type": "rejection",
+      "request": "Review the vacation policy and prepare an approval request for three days off because a family visit. The start date is 2026-11-10 and the end date is 2026-11-12.",
+      "policy": "default",
+      "followup": "reject",
+      "llm_responses": [
+        "{\"intent\":\"draft_action\",\"tool\":\"prepare_approval_request\",\"action_type\":\"leave_request\"}",
+        "{\"action_type\":\"leave_request\",\"days\":3,\"reason\":\"a family visit\",\"start_date\":\"2026-11-10\",\"end_date\":\"2026-11-12\",\"source_ids\":[\"S1\"]}"
+      ],
+      "expected_status": "rejected",
+      "expect_execution": false,
+      "expect_approval_decision": "rejected"
+    }
+  ]
+}

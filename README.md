@@ -237,9 +237,11 @@ Configure `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_TIMEOUT_SECONDS`, `RAG_CONT
 python eval/run_rag_eval.py
 python eval/run_rag_eval.py --output /tmp/rag_eval.json
 python eval/run_retrieval_eval.py
+python eval/run_agent_eval.py
+python eval/run_mcp_eval.py
 ```
 
-Uses synthetic documents in `eval/datasets/rag_quality_v1.json` and `eval/datasets/retrieval_hybrid_v1.json` plus fake embeddings/LLM. It does not write to PostgreSQL or download models. Mock aggregates are not MiniLM, PostgreSQL FTS, BM25, or Ollama quality scores.
+Uses synthetic documents in `eval/datasets/` plus fake embeddings/LLM (except MCP, which uses the real in-process MCP client). It does not write to PostgreSQL or download models. Mock aggregates are not MiniLM, PostgreSQL FTS, BM25, or Ollama quality scores. Live RAG/retrieval is opt-in (`--mode live`) and documented in `eval/README.md`.
 
 | Metric | Definition |
 |---|---|

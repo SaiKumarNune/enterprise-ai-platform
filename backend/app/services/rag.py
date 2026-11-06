@@ -15,7 +15,14 @@ from app.models.chunk import DocumentChunk
 from app.services.embeddings import EmbeddingBackend
 from app.services.llm import LLMBackend
 from app.services.authorization import Principal
-from app.services.retrieval import HYBRID, LEXICAL, SEMANTIC, normalize_retrieval_mode, retrieve_chunks
+from app.services.retrieval import (
+    HYBRID,
+    LEXICAL,
+    SEMANTIC,
+    lexical_tokens,
+    normalize_retrieval_mode,
+    retrieve_chunks,
+)
 
 logger = logging.getLogger("app.rag")
 
@@ -123,6 +130,8 @@ def answer_question(
             document_id=document_id,
             retrieval_mode=retrieval_mode,
         )
+        selected = keep_sufficient_evidence(question, selected)
+        sources = assign_source_ids(selected) if selected else []
         if not selected:
             outcome = "abstained"
             return _insufficient(retrieval_count, used_mode)
@@ -331,6 +340,60 @@ def source_dicts_for_citations(
 ) -> list[dict]:
     wanted = set(citation_ids)
     return [source for source in sources if source.get("source_id") in wanted]
+
+
+def keep_sufficient_evidence(
+    question: str,
+    rows: list[tuple[DocumentChunk, float]],
+) -> list[tuple[DocumentChunk, float]]:
+    query_terms = content_terms(question)
+    if not query_terms:
+        return rows
+    required = 1 if len(query_terms) == 1 else 2
+    return [
+        (chunk, score)
+        for chunk, score in rows
+        if overlapping_term_count(query_terms, content_terms(chunk.content)) >= required
+    ]
+
+
+def content_terms(text: str) -> set[str]:
+    return {_stem_content_token(token) for token in lexical_tokens(text)}
+
+
+def overlapping_term_count(query_terms: set[str], doc_terms: set[str]) -> int:
+    remaining = set(doc_terms)
+    matched = 0
+    for query in query_terms:
+        found = next((doc for doc in remaining if _terms_match(query, doc)), None)
+        if found is None:
+            continue
+        matched += 1
+        remaining.remove(found)
+    return matched
+
+
+def _terms_match(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    shorter, longer = (left, right) if len(left) <= len(right) else (right, left)
+    return len(shorter) >= 4 and longer.startswith(shorter)
+
+
+def _stem_content_token(token: str) -> str:
+    if token.endswith("ation") and len(token) - 5 >= 4:
+        return token[:-5]
+    if token.endswith("tion") and len(token) - 4 >= 4:
+        return token[:-4]
+    if token.endswith("ing") and len(token) - 3 >= 4:
+        return token[:-3]
+    if token.endswith("ed") and len(token) - 2 >= 4:
+        return token[:-2]
+    if token.endswith("es") and len(token) - 2 >= 4:
+        return token[:-2]
+    if token.endswith("s") and len(token) - 1 >= 4:
+        return token[:-1]
+    return token
 
 
 def select_context(
