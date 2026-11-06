@@ -50,6 +50,8 @@ def test_mcp_lists_only_non_executing_tools() -> None:
     names = asyncio.run(_run())
     assert set(names) == EXPOSED_TOOLS
     assert "execute_approved_action" not in names
+    assert "create_ticket" in names
+    assert "prepare_ticket" in names
 
 
 def test_mcp_knowledge_search_returns_authorized_excerpts() -> None:

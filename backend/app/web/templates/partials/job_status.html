@@ -1,0 +1,23 @@
+{% if error and not job %}
+<p class="state error" role="alert">{{ error }}</p>
+{% endif %}
+{% if job %}
+<article class="card job" id="job-{{ job.id }}"
+  {% if job.status in ["queued", "running"] %}
+  hx-get="/app/documents/{{ job.document_id }}/jobs/{{ job.id }}"
+  hx-trigger="every 2s"
+  hx-swap="outerHTML"
+  {% else %}
+  data-job-done="true"
+  {% endif %}>
+  {% if job.status in ["queued", "running"] %}
+  <p class="state loading">Processing job {{ job.status }} (attempt {{ job.attempt_count }}/{{ job.max_attempts }}).</p>
+  {% elif job.status == "succeeded" %}
+  <p class="state success">Processing finished successfully.</p>
+  {% elif job.status == "failed" %}
+  <p class="state error">Processing failed{% if job.last_error %}: {{ job.last_error }}{% endif %}.</p>
+  {% else %}
+  <p class="state">Job status: {{ job.status }}.</p>
+  {% endif %}
+</article>
+{% endif %}

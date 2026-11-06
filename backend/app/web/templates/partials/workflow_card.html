@@ -1,0 +1,36 @@
+{% if error %}
+<p class="state error" role="alert">{{ error }}</p>
+{% endif %}
+{% if workflow %}
+<article class="card">
+  <p class="meta">{{ workflow.workflow_id }} · {{ workflow.status }}{% if workflow.approval_decision %} · {{ workflow.approval_decision }}{% endif %}</p>
+  <p><strong>Request:</strong> {{ workflow.request }}</p>
+  {% if workflow.answer %}<p class="answer">{{ workflow.answer }}</p>{% endif %}
+  {% if workflow.draft %}
+  <h3>Draft</h3>
+  <pre>{{ workflow.draft }}</pre>
+  {% endif %}
+  {% if workflow.sources %}
+  <h3>Sources</h3>
+  <ul>
+    {% for source in workflow.sources %}
+    <li>[{{ source.source_id }}] chunk {{ source.chunk_index }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if can_approve and workflow.status == "pending_approval" %}
+  <div class="row">
+    <form method="post" action="/app/agents/{{ workflow.workflow_id }}/approve"
+          hx-post="/app/agents/{{ workflow.workflow_id }}/approve" hx-target="#workflow-panel" hx-swap="innerHTML">
+      <button type="submit">Approve</button>
+    </form>
+    <form method="post" action="/app/agents/{{ workflow.workflow_id }}/reject"
+          hx-post="/app/agents/{{ workflow.workflow_id }}/reject" hx-target="#workflow-panel" hx-swap="innerHTML">
+      <button type="submit" class="secondary">Reject</button>
+    </form>
+  </div>
+  {% endif %}
+</article>
+{% elif not error %}
+<p class="state empty">No workflow loaded. Run a request or open an id you are allowed to read.</p>
+{% endif %}

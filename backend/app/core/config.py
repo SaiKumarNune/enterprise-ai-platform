@@ -43,6 +43,19 @@ class Settings:
     log_json: bool
     metrics_enabled: bool
     metrics_token: str = field(repr=False, default="")
+    processing_job_max_attempts: int = 3
+    processing_job_lease_seconds: int = 600
+    processing_job_poll_seconds: float = 1.0
+    processing_job_backoff_seconds: int = 5
+    auth_invite_only: bool = False
+    oidc_enabled: bool = False
+    oidc_issuer: str = ""
+    oidc_client_id: str = ""
+    oidc_client_secret: str = field(repr=False, default="")
+    oidc_redirect_uri: str = ""
+    oidc_scopes: str = "openid email"
+    oidc_discovery_url: str = ""
+    ticketing_enabled: bool = False
 
     @property
     def database_url(self) -> str:
@@ -93,6 +106,19 @@ def _load_settings() -> Settings:
         log_json=os.getenv("LOG_JSON", "true").strip().lower() in {"1", "true", "yes"},
         metrics_enabled=os.getenv("METRICS_ENABLED", "false").strip().lower() in {"1", "true", "yes"},
         metrics_token=os.getenv("METRICS_TOKEN", ""),
+        processing_job_max_attempts=int(os.getenv("PROCESSING_JOB_MAX_ATTEMPTS", "3")),
+        processing_job_lease_seconds=int(os.getenv("PROCESSING_JOB_LEASE_SECONDS", "600")),
+        processing_job_poll_seconds=float(os.getenv("PROCESSING_JOB_POLL_SECONDS", "1")),
+        processing_job_backoff_seconds=int(os.getenv("PROCESSING_JOB_BACKOFF_SECONDS", "5")),
+        auth_invite_only=os.getenv("AUTH_INVITE_ONLY", "false").strip().lower() in {"1", "true", "yes"},
+        oidc_enabled=os.getenv("OIDC_ENABLED", "false").strip().lower() in {"1", "true", "yes"},
+        oidc_issuer=os.getenv("OIDC_ISSUER", "").strip().rstrip("/"),
+        oidc_client_id=os.getenv("OIDC_CLIENT_ID", "").strip(),
+        oidc_client_secret=os.getenv("OIDC_CLIENT_SECRET", ""),
+        oidc_redirect_uri=os.getenv("OIDC_REDIRECT_URI", "").strip(),
+        oidc_scopes=os.getenv("OIDC_SCOPES", "openid email").strip() or "openid email",
+        oidc_discovery_url=os.getenv("OIDC_DISCOVERY_URL", "").strip(),
+        ticketing_enabled=os.getenv("TICKETING_ENABLED", "false").strip().lower() in {"1", "true", "yes"},
     )
 
 

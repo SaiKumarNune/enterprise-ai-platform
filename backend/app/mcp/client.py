@@ -60,6 +60,48 @@ def invoke_prepare_approval_request(
     return payload.get("draft")
 
 
+def invoke_prepare_ticket(
+    *,
+    principal: Principal,
+    request: str,
+    raw_draft: str,
+    valid_source_ids: set[str],
+) -> dict[str, Any] | None:
+    payload = _call_tool(
+        McpExecutionContext(principal=principal),
+        "prepare_ticket",
+        {
+            "request": request,
+            "raw_draft": raw_draft,
+            "valid_source_ids": sorted(valid_source_ids),
+        },
+    )
+    return payload.get("draft")
+
+
+def invoke_create_ticket(
+    *,
+    principal: Principal,
+    title: str,
+    description: str,
+    priority: str,
+    workflow_id: UUID,
+) -> dict[str, Any]:
+    return _call_tool(
+        McpExecutionContext(
+            principal=principal,
+            execution_authorized=True,
+            workflow_id=workflow_id,
+        ),
+        "create_ticket",
+        {
+            "title": title,
+            "description": description,
+            "priority": priority,
+        },
+    )
+
+
 def _call_tool(context: McpExecutionContext, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     result = _run_isolated(_invoke(context, name, arguments))
     if result.isError:

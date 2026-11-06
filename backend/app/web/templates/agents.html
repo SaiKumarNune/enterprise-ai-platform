@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Agents{% endblock %}
+{% block content %}
+<h1>Agent workflows</h1>
+<p class="lede">Runs <code>/agents/run</code>. There is no list-all API; look up a workflow by id (managers and admins in the same tenant can open pending drafts).</p>
+<form class="card stack" method="post" action="/app/agents/run"
+      hx-post="/app/agents/run" hx-target="#workflow-panel" hx-swap="innerHTML">
+  <label>Request
+    <textarea name="request_text" rows="3" required maxlength="2000">{{ request_text }}</textarea>
+  </label>
+  <div class="row">
+    <button type="submit">Run agent</button>
+    <span class="loading" hidden>Running workflow…</span>
+  </div>
+</form>
+<form class="card row" method="post" action="/app/agents/lookup"
+      hx-post="/app/agents/lookup" hx-target="#workflow-panel" hx-swap="innerHTML">
+  <label class="grow">Workflow id
+    <input type="text" name="workflow_id" placeholder="UUID" required>
+  </label>
+  <button type="submit">Open</button>
+</form>
+<div id="workflow-panel">
+  {% include "partials/workflow_card.html" %}
+</div>
+{% endblock %}

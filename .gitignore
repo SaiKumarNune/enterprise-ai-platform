@@ -33,6 +33,9 @@ build/
 # Local document uploads
 uploads/
 
+# Sibling portfolio site (not part of this backend)
+saikumar-portfolio/
+
 # Editors and OS
 .DS_Store
 .idea/

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import re
 import threading
 import time
@@ -44,11 +46,18 @@ def hash_password(password: str) -> str:
     return _HASHER.hash(password)
 
 
-def verify_password(password: str, password_hash: str) -> bool:
+def verify_password(password: str, password_hash: str | None) -> bool:
+    if not password_hash:
+        return False
     try:
         return _HASHER.verify(password_hash, password)
-    except (VerifyMismatchError, ValueError):
+    except (VerifyMismatchError, ValueError, TypeError):
         return False
+
+
+def hash_secret(value: str) -> str:
+    secret, _algorithm, _expire_minutes = require_jwt_config()
+    return hmac.new(secret.encode("utf-8"), value.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def jwt_is_configured() -> bool:

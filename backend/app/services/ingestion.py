@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
@@ -19,6 +21,10 @@ class IngestionConflictError(Exception):
     """The document cannot be processed in its current state."""
 
 
+class LeaseLostError(Exception):
+    """The processing lease is no longer held; durable writes must not proceed."""
+
+
 def process_stored_document(
     db: Session,
     document: Document,
@@ -27,10 +33,16 @@ def process_stored_document(
     *,
     chunk_size: int,
     overlap: int,
+    assume_claimed: bool = False,
+    mark_failed_on_error: bool = True,
+    hold_lease: Callable[[], bool] | None = None,
 ) -> Document:
-    if document.status == "processing":
-        raise IngestionConflictError("Document is already being processed")
-    if document.status not in PROCESSABLE_STATUSES:
+    if not assume_claimed:
+        if document.status == "processing":
+            raise IngestionConflictError("Document is already being processed")
+        if document.status not in PROCESSABLE_STATUSES:
+            raise IngestionConflictError("Document cannot be processed in its current state")
+    elif document.status not in PROCESSABLE_STATUSES | {"processing"}:
         raise IngestionConflictError("Document cannot be processed in its current state")
     if not document.storage_path:
         raise IngestionConflictError("Document has no stored file")
@@ -40,8 +52,9 @@ def process_stored_document(
     except StoredFileMissingError:
         raise
 
-    document.status = "processing"
-    db.commit()
+    if not assume_claimed:
+        document.status = "processing"
+        db.commit()
 
     try:
         extracted = extract_document(path, document.content_type)
@@ -53,8 +66,10 @@ def process_stored_document(
         )
         if not pieces:
             raise EmptyDocumentError("Document contains no extractable text")
+        _ensure_lease(hold_lease)
 
         embeddings = embedder.embed_texts([piece.content for piece in pieces])
+        _ensure_lease(hold_lease)
 
         db.execute(
             delete(DocumentChunk).where(DocumentChunk.document_id == document.id)
@@ -76,8 +91,14 @@ def process_stored_document(
     except Exception:
         document_id = document.id
         db.rollback()
-        failed = db.get(Document, document_id)
-        if failed is not None:
-            failed.status = "failed"
-            db.commit()
+        if mark_failed_on_error:
+            failed = db.get(Document, document_id)
+            if failed is not None:
+                failed.status = "failed"
+                db.commit()
         raise
+
+
+def _ensure_lease(hold_lease: Callable[[], bool] | None) -> None:
+    if hold_lease is not None and not hold_lease():
+        raise LeaseLostError("processing lease lost")

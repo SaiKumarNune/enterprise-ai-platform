@@ -28,8 +28,10 @@ from app.services.agent_workflow import (  # noqa: E402
     run_agent_workflow,
 )
 from app.services.authorization import Principal  # noqa: E402
+from eval.classify import classify_agent_failure, failures_by_scenario, scenario_breakdown  # noqa: E402
 from eval.live import not_run_report, probe_live_environment  # noqa: E402
 from eval.reporting import write_report  # noqa: E402
+from eval.ticketing_env import ticketing_enabled  # noqa: E402
 from tests.auth_helpers import own_session_documents, seed_tenant, seed_user  # noqa: E402
 from tests.fake_embeddings import HashEmbedder  # noqa: E402
 from tests.fake_llm import SequenceLLM  # noqa: E402
@@ -96,16 +98,24 @@ def run_eval(dataset_path: Path, *, mode: str = "offline_mock") -> dict:
             "approval_gate_compliance": _rate(cases, "approval_ok"),
             "issue_code_recall": _rate(cases, "issues_ok"),
         },
+        "scenario_breakdown": scenario_breakdown(cases),
+        "failures_by_scenario": failures_by_scenario(cases),
         "cases": cases,
         "limitations": [
             "Offline SequenceLLM scripts the planner/action text; this measures graph routing and gates, not Ollama planning quality.",
-            "Execution remains simulated; no external HR action is taken.",
+            "Execution remains simulated; no external HR or ticketing vendor action is taken.",
+            "Ticket cases use the in-process mock adapter. Scores are not live planner quality.",
         ],
         "notes": ["Traces are structured agent/outcome/summary records, not private chain-of-thought."],
     }
 
 
 def _run_case(case: dict, live_llm) -> dict:
+    with ticketing_enabled(bool(case.get("ticketing_enabled"))):
+        return _run_case_body(case, live_llm)
+
+
+def _run_case_body(case: dict, live_llm) -> dict:
     session, document = _policy_session(case.get("policy") or "default")
     employee = seed_user(session, email=f"emp-{uuid4().hex[:8]}@example.test")
     manager = seed_user(session, role="manager", email=f"mgr-{uuid4().hex[:8]}@example.test", tenant_id=employee.tenant_id)
@@ -153,6 +163,7 @@ def _run_case(case: dict, live_llm) -> dict:
             "intent": workflow.intent,
             "agents": [step.get("agent") for step in (workflow.agent_trace or [])],
             "draft": workflow.draft is not None,
+            "action_type": (workflow.draft or {}).get("action_type"),
             "execution": workflow.execution_result,
             "approval_decision": workflow.approval_decision,
             "issue_codes": [
@@ -168,6 +179,7 @@ def _run_case(case: dict, live_llm) -> dict:
             "intent": None,
             "agents": [],
             "draft": False,
+            "action_type": None,
             "execution": None,
             "approval_decision": None,
             "issue_codes": [],
@@ -178,24 +190,30 @@ def _run_case(case: dict, live_llm) -> dict:
     status_ok = _status_ok(case, observed)
     approval_ok = _approval_ok(case, observed)
     issues_ok = _issues_ok(case, observed)
-    passed = routing_ok and status_ok and approval_ok and issues_ok
+    action_ok = _action_ok(case, observed)
+    passed = routing_ok and status_ok and approval_ok and issues_ok and action_ok
     if expected_error:
         passed = observed.get("error") == expected_error
-        routing_ok = status_ok = approval_ok = issues_ok = passed
+        routing_ok = status_ok = approval_ok = issues_ok = action_ok = passed
     return {
         "case_id": case["id"],
         "type": case["type"],
+        "case_type": case["type"],
         "expected": {
             "status": case.get("expected_status"),
             "intent": case.get("expected_intent"),
             "error": expected_error,
             "expect_execution": bool(case.get("expect_execution")),
+            "action_type": case.get("expected_action_type"),
+            "ticket_created": case.get("expect_ticket_created"),
         },
         "observed": observed,
         "routing_ok": routing_ok,
         "status_ok": status_ok,
         "approval_ok": approval_ok,
         "issues_ok": issues_ok,
+        "action_ok": action_ok,
+        "failure_layer": classify_agent_failure(passed=passed, case=case, observed=observed),
         "passed": passed,
     }
 
@@ -225,6 +243,11 @@ def _status_ok(case: dict, observed: dict) -> bool:
 
 def _approval_ok(case: dict, observed: dict) -> bool:
     executed = bool(observed.get("execution"))
+    created = bool((observed.get("execution") or {}).get("created"))
+    if case.get("expect_ticket_created") is True:
+        return executed and created
+    if case.get("expect_ticket_created") is False and case.get("followup") == "approve":
+        return executed and not created
     if case.get("expect_execution"):
         return executed and bool((observed.get("execution") or {}).get("simulated", True))
     if case.get("expect_approval_gate"):
@@ -232,6 +255,13 @@ def _approval_ok(case: dict, observed: dict) -> bool:
     if case.get("followup") == "reject":
         return observed.get("approval_decision") == "rejected" and not executed
     return not executed
+
+
+def _action_ok(case: dict, observed: dict) -> bool:
+    expected = case.get("expected_action_type")
+    if not expected:
+        return True
+    return observed.get("action_type") == expected
 
 
 def _issues_ok(case: dict, observed: dict) -> bool:

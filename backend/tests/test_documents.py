@@ -10,6 +10,10 @@ from app.models.acl import DocumentACL
 from app.models.audit import AuditEvent
 from app.models.chunk import DocumentChunk
 from app.models.document import Document
+from app.models.identity import ExternalIdentity
+from app.models.invitation import Invitation
+from app.models.oidc_state import OidcLoginState
+from app.models.processing_job import ProcessingJob
 from app.models.tenant import Tenant
 from app.models.user import User
 from app.models.workflow import AgentWorkflow
@@ -42,6 +46,10 @@ class FakeSession:
         self.tenants: list[Tenant] = []
         self.acls: list[DocumentACL] = []
         self.audits: list[AuditEvent] = []
+        self.jobs: list[ProcessingJob] = []
+        self.invitations: list[Invitation] = []
+        self.identities: list[ExternalIdentity] = []
+        self.oidc_states: list[OidcLoginState] = []
         self.added: list[object] = []
         self.deleted: list[object] = []
         self.commit_called = False
@@ -109,6 +117,19 @@ class FakeSession:
             if obj not in self.workflows:
                 self.workflows.append(obj)
             return
+        if isinstance(obj, ProcessingJob):
+            if obj.id is None:
+                obj.id = uuid.uuid4()
+            if obj.created_at is None:
+                obj.created_at = now
+            if obj.updated_at is None:
+                obj.updated_at = now
+            if obj.attempt_count is None:
+                obj.attempt_count = 0
+            self.added.append(obj)
+            if obj not in self.jobs:
+                self.jobs.append(obj)
+            return
         if isinstance(obj, DocumentChunk):
             if obj.id is None:
                 obj.id = uuid.uuid4()
@@ -116,6 +137,31 @@ class FakeSession:
                 obj.created_at = now
             self.added.append(obj)
             self.chunks.append(obj)
+            return
+        if isinstance(obj, Invitation):
+            if obj.id is None:
+                obj.id = uuid.uuid4()
+            if obj.created_at is None:
+                obj.created_at = now
+            self.added.append(obj)
+            if obj not in self.invitations:
+                self.invitations.append(obj)
+            return
+        if isinstance(obj, ExternalIdentity):
+            if obj.id is None:
+                obj.id = uuid.uuid4()
+            if obj.created_at is None:
+                obj.created_at = now
+            self.added.append(obj)
+            if obj not in self.identities:
+                self.identities.append(obj)
+            return
+        if isinstance(obj, OidcLoginState):
+            if obj.created_at is None:
+                obj.created_at = now
+            self.added.append(obj)
+            if obj not in self.oidc_states:
+                self.oidc_states.append(obj)
             return
         document = obj
         assert isinstance(document, Document)
@@ -158,6 +204,8 @@ class FakeSession:
             self._lock_held = True
         if model is DocumentChunk:
             rows = self.chunks
+        elif model is ProcessingJob:
+            rows = self.jobs
         elif model is AgentWorkflow:
             rows = self.workflows
         elif model is User:
@@ -168,6 +216,15 @@ class FakeSession:
             rows = self.acls
         elif model is AuditEvent:
             rows = self.audits
+        elif model is Invitation:
+            rows = self.invitations
+        elif model is ExternalIdentity:
+            rows = self.identities
+        elif model is OidcLoginState:
+            for item in self.oidc_states:
+                if item.state_hash == ident:
+                    return item
+            return None
         else:
             rows = self.documents
         for item in rows:
@@ -183,16 +240,62 @@ class FakeSession:
         if isinstance(obj, DocumentACL):
             self.acls = [item for item in self.acls if item.id != obj.id]
             return
+        if isinstance(obj, OidcLoginState):
+            self.oidc_states = [item for item in self.oidc_states if item.state_hash != obj.state_hash]
+            return
+        if isinstance(obj, Invitation):
+            self.invitations = [item for item in self.invitations if item.id != obj.id]
+            return
+        if isinstance(obj, ExternalIdentity):
+            self.identities = [item for item in self.identities if item.id != obj.id]
+            return
         document = obj
         assert isinstance(document, Document)
         self.documents = [item for item in self.documents if item.id != document.id]
         self.chunks = [item for item in self.chunks if item.document_id != document.id]
         self.acls = [item for item in self.acls if item.document_id != document.id]
+        self.jobs = [item for item in self.jobs if item.document_id != document.id]
 
     def execute(self, statement):
         compiled = statement.compile()
         sql = str(compiled).lower()
         params = compiled.params
+        if bool(getattr(statement, "is_update", False)) or sql.strip().startswith("update"):
+            if not self._lock_held:
+                self._row_lock.acquire()
+                self._lock_held = True
+            now = datetime.now(timezone.utc)
+            matched = 0
+            for item in self.invitations:
+                if item.id not in params.values():
+                    continue
+                email = next(
+                    (value for value in params.values() if isinstance(value, str) and "@" in value),
+                    None,
+                )
+                if item.consumed_at is not None:
+                    break
+                if item.expires_at <= now:
+                    break
+                if email is not None and item.email != email:
+                    break
+                item.consumed_at = now
+                consumed_by = next(
+                    (
+                        value
+                        for value in params.values()
+                        if isinstance(value, uuid.UUID) and value not in {item.id, item.tenant_id, item.created_by}
+                    ),
+                    None,
+                )
+                item.consumed_by = consumed_by
+                matched = 1
+                break
+
+            class Result:
+                rowcount = matched
+
+            return Result()
         if sql.strip().startswith("delete"):
             document_id = next(
                 (value for value in params.values() if isinstance(value, uuid.UUID)),
@@ -208,17 +311,19 @@ class FakeSession:
 
     def scalar(self, statement):
         self.last_statement = statement
+        for_update = getattr(statement, "_for_update_arg", None)
+        if for_update is not None and not self._lock_held:
+            self._row_lock.acquire()
+            self._lock_held = True
         entity = statement.column_descriptions[0]["entity"]
         params = statement.compile().params
+        strings = [value for value in params.values() if isinstance(value, str)]
+        user_id = next(
+            (value for value in params.values() if isinstance(value, uuid.UUID)),
+            None,
+        )
         if entity is User:
-            email = next(
-                (value for value in params.values() if isinstance(value, str)),
-                None,
-            )
-            user_id = next(
-                (value for value in params.values() if isinstance(value, uuid.UUID)),
-                None,
-            )
+            email = next((value for value in strings if "@" in value), None)
             for item in self.users:
                 if email is not None and item.email == email:
                     return item
@@ -226,12 +331,42 @@ class FakeSession:
                     return item
             return None
         if entity is AgentWorkflow:
-            workflow_id = next(
-                (value for value in params.values() if isinstance(value, uuid.UUID)),
-                None,
-            )
             for item in self.workflows:
-                if workflow_id is not None and item.id == workflow_id:
+                if user_id is not None and item.id == user_id:
+                    return item
+            return None
+        if entity is Invitation:
+            email = next((value for value in strings if "@" in value), None)
+            token_hash = next((value for value in strings if "@" not in value), None)
+            rows = list(self.invitations)
+            if email is not None:
+                rows = [item for item in rows if item.email == email]
+            if token_hash is not None:
+                rows = [item for item in rows if item.token_hash == token_hash]
+            if user_id is not None:
+                rows = [item for item in rows if item.tenant_id == user_id]
+            open_rows = [
+                item
+                for item in rows
+                if item.consumed_at is None and item.expires_at > datetime.now(timezone.utc)
+            ]
+            if token_hash is None:
+                return open_rows[0] if open_rows else None
+            return rows[0] if rows else None
+        if entity is ExternalIdentity:
+            issuer = next((value for value in strings if value.startswith("http")), None)
+            subject = next((value for value in strings if value != issuer), None)
+            for item in self.identities:
+                if issuer is not None and subject is not None:
+                    if item.issuer == issuer and item.subject == subject:
+                        return item
+                elif user_id is not None and item.user_id == user_id:
+                    return item
+            return None
+        if entity is OidcLoginState:
+            state_hash = next(iter(strings), None)
+            for item in self.oidc_states:
+                if state_hash is not None and item.state_hash == state_hash:
                     return item
             return None
         return None
@@ -271,6 +406,17 @@ class FakeSession:
             )
             if document_id is not None:
                 rows = [item for item in rows if item.document_id == document_id]
+        elif entity is Invitation:
+            rows = list(self.invitations)
+            params = statement.compile().params
+            tenant_id = next(
+                (value for value in params.values() if isinstance(value, uuid.UUID)),
+                None,
+            )
+            if tenant_id is not None:
+                rows = [item for item in rows if item.tenant_id == tenant_id]
+        elif entity is ExternalIdentity:
+            rows = list(self.identities)
         else:
             rows = list(self.documents)
         selected = rows[offset:] if limit is None else rows[offset : offset + limit]

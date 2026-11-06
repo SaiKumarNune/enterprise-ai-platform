@@ -1,6 +1,6 @@
 {
-  "version": "1.0",
-  "description": "In-process MCP tool evaluation, including negative authorization cases. Tools are invoked through the MCP client/server session, not by calling knowledge_search() directly.",
+  "version": "1.1",
+  "description": "In-process MCP tool evaluation, including identity boundaries and ticket execution restrictions. Tools are invoked through the MCP client/server session, not by calling knowledge_search() directly.",
   "cases": [
     {
       "id": "search-success",
@@ -66,6 +66,79 @@
       "arguments": {"draft": {"action_type": "leave_request"}, "authorized": true},
       "expect_success": false,
       "expect_error_substring": "Unknown tool"
+    },
+    {
+      "id": "prepare-ticket-no-create",
+      "type": "success",
+      "tool": "prepare_ticket",
+      "request": "Open a ticket because VPN access is broken",
+      "raw_draft": "{\"action_type\":\"create_ticket\",\"title\":\"VPN access is broken\",\"description\":\"VPN down\",\"priority\":\"high\",\"tenant_id\":\"attacker\",\"source_ids\":[]}",
+      "expect_success": true,
+      "expect_requires_approval": true,
+      "forbid_execution_fields": true,
+      "forbid_identity_fields": true
+    },
+    {
+      "id": "create-ticket-without-approval",
+      "type": "authorization",
+      "tool": "create_ticket",
+      "ticketing_enabled": true,
+      "bind_workflow": true,
+      "arguments": {
+        "title": "VPN access is broken",
+        "description": "VPN down",
+        "priority": "high"
+      },
+      "expect_success": false,
+      "expect_error_substring": "approval"
+    },
+    {
+      "id": "create-ticket-identity-fields",
+      "type": "security",
+      "tool": "create_ticket",
+      "ticketing_enabled": true,
+      "execution_authorized": true,
+      "bind_workflow": true,
+      "arguments": {
+        "title": "VPN access is broken",
+        "description": "VPN down",
+        "priority": "high",
+        "tenant_id": "00000000-0000-4000-8000-000000000098",
+        "user_id": "00000000-0000-4000-8000-000000000099",
+        "authorized": true
+      },
+      "expect_success": false,
+      "expect_error_substring": "identity"
+    },
+    {
+      "id": "create-ticket-disabled",
+      "type": "authorization",
+      "tool": "create_ticket",
+      "ticketing_enabled": false,
+      "execution_authorized": true,
+      "bind_workflow": true,
+      "arguments": {
+        "title": "VPN access is broken",
+        "description": "VPN down",
+        "priority": "high"
+      },
+      "expect_success": false,
+      "expect_error_substring": "disabled"
+    },
+    {
+      "id": "create-ticket-after-approval",
+      "type": "success",
+      "tool": "create_ticket",
+      "ticketing_enabled": true,
+      "execution_authorized": true,
+      "bind_workflow": true,
+      "arguments": {
+        "title": "VPN access is broken",
+        "description": "VPN down",
+        "priority": "high"
+      },
+      "expect_success": true,
+      "expect_created": true
     }
   ]
 }

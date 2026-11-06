@@ -8,6 +8,7 @@ import asyncio
 import json
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
 BACKEND = ROOT / "backend"
@@ -18,12 +19,18 @@ for path in (str(ROOT), str(BACKEND)):
 from mcp.shared.memory import create_connected_server_and_client_session  # noqa: E402
 from mcp.types import TextContent  # noqa: E402
 
-from app.mcp.client import invoke_knowledge_search, invoke_prepare_approval_request  # noqa: E402
+from app.mcp.client import (  # noqa: E402
+    invoke_knowledge_search,
+    invoke_prepare_approval_request,
+    invoke_prepare_ticket,
+)
 from app.mcp.context import McpExecutionContext  # noqa: E402
 from app.mcp.errors import McpToolError  # noqa: E402
 from app.mcp.server import EXPOSED_TOOLS, build_mcp_server  # noqa: E402
 from app.services.authorization import Principal  # noqa: E402
+from eval.classify import classify_mcp_failure, failures_by_scenario, scenario_breakdown  # noqa: E402
 from eval.reporting import write_report  # noqa: E402
+from eval.ticketing_env import ticketing_enabled  # noqa: E402
 from tests.auth_helpers import own_session_documents, seed_tenant, seed_user  # noqa: E402
 from tests.fake_embeddings import HashEmbedder  # noqa: E402
 from tests.test_agents import _session_with_policy  # noqa: E402
@@ -56,13 +63,15 @@ def run_eval(dataset_path: Path) -> dict:
         "metric_definitions": {
             "tool_success_rate": "Share of cases whose success/error matched expect_success.",
             "schema_rejection_rate": "Share of schema/security cases that returned isError.",
-            "exposed_tools": "MCP list_tools names; execute_approved_action must be absent.",
+            "exposed_tools": "MCP list_tools names; execute_approved_action must be absent; create_ticket is listed but gated.",
         },
         "aggregates": {
             "n_cases": len(results),
             "tool_success_rate": round(sum(1 for item in results if item["passed"]) / len(results), 4),
             "exposed_tools": listed,
         },
+        "scenario_breakdown": scenario_breakdown(results),
+        "failures_by_scenario": failures_by_scenario(results),
         "cases": results,
         "limitations": [
             "Uses the official MCP in-memory transport against build_mcp_server; not a network MCP port.",
@@ -73,15 +82,23 @@ def run_eval(dataset_path: Path) -> dict:
 
 
 def _run_case(case: dict, session, document, owner, embedder) -> dict:
+    with ticketing_enabled(bool(case.get("ticketing_enabled"))):
+        return _run_case_body(case, session, document, owner, embedder)
+
+
+def _run_case_body(case: dict, session, document, owner, embedder) -> dict:
     principal_user = owner
     if case.get("inactive"):
         principal_user = seed_user(session, is_active=False, tenant_id=owner.tenant_id)
     if case.get("cross_tenant"):
         principal_user = seed_user(session, tenant_id=seed_tenant(session, name="OtherMCP").id)
+    workflow_id = uuid4() if case.get("bind_workflow") else None
     context = McpExecutionContext(
         principal=Principal.from_user(principal_user),
         db=session,
         embedder=embedder,
+        execution_authorized=bool(case.get("execution_authorized")),
+        workflow_id=workflow_id,
     )
     expected_success = bool(case.get("expect_success"))
     error_text = None
@@ -115,6 +132,14 @@ def _run_case(case: dict, session, document, owner, embedder) -> dict:
                 action_type="leave_request",
             )
             success = payload is not None
+        elif tool == "prepare_ticket":
+            payload = invoke_prepare_ticket(
+                principal=Principal.from_user(principal_user),
+                request=case["request"],
+                raw_draft=case["raw_draft"],
+                valid_source_ids=set(),
+            )
+            success = payload is not None
         else:
             result = _raw_call(context, tool, case.get("arguments") or {})
             success = not result.isError
@@ -133,12 +158,19 @@ def _run_case(case: dict, session, document, owner, embedder) -> dict:
     if case.get("expect_requires_approval"):
         passed = passed and bool((payload or {}).get("requires_approval"))
     if case.get("forbid_execution_fields"):
-        passed = passed and "simulated" not in (payload or {})
+        passed = passed and "simulated" not in (payload or {}) and "ticket_id" not in (payload or {})
+    if case.get("forbid_identity_fields"):
+        keys = set(payload or {})
+        passed = passed and not keys.intersection({"tenant_id", "user_id", "authorized", "requester_user_id"})
+    if case.get("expect_created"):
+        passed = passed and bool((payload or {}).get("created"))
     return {
         "case_id": case["id"],
         "type": case["type"],
+        "case_type": case["type"],
         "expected": {"success": expected_success, "error_substring": needle},
         "observed": {"success": success, "error": error_text, "payload_keys": list((payload or {}).keys())},
+        "failure_layer": classify_mcp_failure(passed=passed, case=case),
         "passed": passed,
     }
 

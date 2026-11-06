@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<h1>Workspace</h1>
+<p class="lede">Signed in as <strong>{{ user.email }}</strong> ({{ user.role }}). Tenant {{ user.tenant_id }}.</p>
+<div class="grid">
+  <a class="tile" href="/app/documents">
+    <h2>Documents</h2>
+    <p>Upload files and watch asynchronous processing jobs.</p>
+  </a>
+  <a class="tile" href="/app/search">
+    <h2>Search</h2>
+    <p>Lexical, semantic, or hybrid retrieval over documents you can read.</p>
+  </a>
+  <a class="tile" href="/app/ask">
+    <h2>Ask</h2>
+    <p>RAG answers with citations from authorized chunks only.</p>
+  </a>
+  <a class="tile" href="/app/agents">
+    <h2>Agents</h2>
+    <p>Run a workflow{% if can_approve %} and approve or reject pending drafts{% endif %}.</p>
+  </a>
+</div>
+{% endblock %}

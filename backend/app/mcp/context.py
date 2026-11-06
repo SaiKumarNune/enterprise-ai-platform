@@ -7,6 +7,7 @@ Tool arguments must never carry user IDs, tenant IDs, roles, or authorization fl
 from __future__ import annotations
 
 from dataclasses import dataclass
+from uuid import UUID
 
 from sqlalchemy.orm import Session
 
@@ -25,6 +26,10 @@ FORBIDDEN_IDENTITY_KEYS = frozenset(
         "is_admin",
         "is_active",
         "owner_id",
+        "requester_user_id",
+        "idempotency_key",
+        "execution_authorized",
+        "workflow_id",
     }
 )
 
@@ -34,3 +39,5 @@ class McpExecutionContext:
     principal: Principal
     db: Session | None = None
     embedder: EmbeddingBackend | None = None
+    execution_authorized: bool = False
+    workflow_id: UUID | None = None

@@ -1,6 +1,6 @@
 {
-  "version": "1.0",
-  "description": "LangGraph orchestration scenarios. Offline mode uses SequenceLLM; traces are structured outcomes, not chain-of-thought.",
+  "version": "1.1",
+  "description": "LangGraph orchestration scenarios including leave and mock ticketing. Offline mode uses SequenceLLM; traces are structured outcomes, not chain-of-thought. Mock scores are not live planner quality.",
   "cases": [
     {
       "id": "informational-vacation",
@@ -117,6 +117,89 @@
       "expected_status": "rejected",
       "expect_execution": false,
       "expect_approval_decision": "rejected"
+    },
+    {
+      "id": "ticket-prepare-pending",
+      "type": "ticket_prepare",
+      "request": "Open a ticket because VPN access is broken",
+      "policy": "default",
+      "ticketing_enabled": true,
+      "llm_responses": [
+        "{\"intent\":\"draft_action\",\"tool\":\"prepare_ticket\",\"action_type\":\"create_ticket\"}",
+        "{\"action_type\":\"create_ticket\",\"title\":\"VPN access is broken\",\"description\":\"Open a ticket because VPN access is broken\",\"priority\":\"high\",\"source_ids\":[]}"
+      ],
+      "expected_status": "pending_approval",
+      "expected_intent": "draft_action",
+      "expected_action_type": "create_ticket",
+      "expected_agents": ["planner", "research", "action", "validator"],
+      "expect_draft": true,
+      "expect_execution": false,
+      "expect_approval_gate": true
+    },
+    {
+      "id": "ticket-human-approval",
+      "type": "ticket_approval",
+      "request": "Open a ticket because VPN access is broken",
+      "policy": "default",
+      "ticketing_enabled": true,
+      "followup": "approve",
+      "llm_responses": [
+        "{\"intent\":\"draft_action\",\"tool\":\"prepare_ticket\",\"action_type\":\"create_ticket\"}",
+        "{\"action_type\":\"create_ticket\",\"title\":\"VPN access is broken\",\"description\":\"Open a ticket because VPN access is broken\",\"priority\":\"high\",\"source_ids\":[]}"
+      ],
+      "expected_status": "completed",
+      "expected_action_type": "create_ticket",
+      "expect_draft": true,
+      "expect_execution": true,
+      "expect_ticket_created": true
+    },
+    {
+      "id": "ticket-human-rejection",
+      "type": "ticket_rejection",
+      "request": "Open a ticket because VPN access is broken",
+      "policy": "default",
+      "ticketing_enabled": true,
+      "followup": "reject",
+      "llm_responses": [
+        "{\"intent\":\"draft_action\",\"tool\":\"prepare_ticket\",\"action_type\":\"create_ticket\"}",
+        "{\"action_type\":\"create_ticket\",\"title\":\"VPN access is broken\",\"description\":\"Open a ticket because VPN access is broken\",\"priority\":\"high\",\"source_ids\":[]}"
+      ],
+      "expected_status": "rejected",
+      "expected_action_type": "create_ticket",
+      "expect_execution": false,
+      "expect_ticket_created": false
+    },
+    {
+      "id": "ticket-unauthorized-execution",
+      "type": "unauthorized_execution",
+      "request": "Open a ticket because VPN access is broken",
+      "policy": "default",
+      "ticketing_enabled": true,
+      "llm_responses": [
+        "{\"intent\":\"draft_action\",\"tool\":\"prepare_ticket\",\"action_type\":\"create_ticket\"}",
+        "{\"action_type\":\"create_ticket\",\"title\":\"VPN access is broken\",\"description\":\"Open a ticket because VPN access is broken\",\"priority\":\"high\",\"source_ids\":[]}"
+      ],
+      "expected_status": "pending_approval",
+      "expected_action_type": "create_ticket",
+      "expect_execution": false,
+      "expect_approval_gate": true,
+      "expect_ticket_created": false
+    },
+    {
+      "id": "ticket-disabled-integration",
+      "type": "ticket_disabled",
+      "request": "Open a ticket because VPN access is broken",
+      "policy": "default",
+      "ticketing_enabled": false,
+      "followup": "approve",
+      "llm_responses": [
+        "{\"intent\":\"draft_action\",\"tool\":\"prepare_ticket\",\"action_type\":\"create_ticket\"}",
+        "{\"action_type\":\"create_ticket\",\"title\":\"VPN access is broken\",\"description\":\"Open a ticket because VPN access is broken\",\"priority\":\"high\",\"source_ids\":[]}"
+      ],
+      "expected_status": "completed",
+      "expected_action_type": "create_ticket",
+      "expect_execution": true,
+      "expect_ticket_created": false
     }
   ]
 }

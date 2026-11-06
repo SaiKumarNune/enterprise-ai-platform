@@ -18,3 +18,11 @@ def test_offline_mcp_eval_uses_mcp_path_and_rejects_identity() -> None:
     assert by_id["cross-tenant-acl"]["passed"] is True
     assert by_id["unknown-execute-tool"]["passed"] is True
     assert report["passed"] is True
+    assert "create_ticket" in report["aggregates"]["exposed_tools"]
+    assert "prepare_ticket" in report["aggregates"]["exposed_tools"]
+    assert by_id["prepare-ticket-no-create"]["passed"] is True
+    assert by_id["create-ticket-without-approval"]["passed"] is True
+    assert by_id["create-ticket-identity-fields"]["passed"] is True
+    assert by_id["create-ticket-disabled"]["passed"] is True
+    assert by_id["create-ticket-after-approval"]["passed"] is True
+    assert report["failures_by_scenario"] == {}

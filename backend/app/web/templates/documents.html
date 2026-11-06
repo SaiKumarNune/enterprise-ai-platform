@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}Documents{% endblock %}
+{% block content %}
+<h1>Documents</h1>
+<p class="lede">Uploads enqueue a processing job (<code>wait=false</code>). Run <code>python -m app.worker</code> locally for jobs to finish.</p>
+{% include "partials/documents_panel.html" %}
+{% endblock %}

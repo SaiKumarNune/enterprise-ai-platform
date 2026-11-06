@@ -1,0 +1,25 @@
+{% if error %}
+<p class="state error" role="alert">{{ error }}</p>
+{% elif result is none %}
+<p class="state empty">Ask a question about documents you are allowed to read.</p>
+{% else %}
+<article class="card">
+  {% if result.abstained %}
+  <p class="state empty">The model abstained. Not enough overlapping evidence in retrieved text.</p>
+  {% else %}
+  <p class="state success">Answer</p>
+  {% endif %}
+  <p class="answer">{{ result.answer }}</p>
+  <p class="meta">grounded={{ result.grounded }} · citations={{ result.citation_valid }} · mode={{ result.retrieval_mode }}</p>
+  {% if result.sources %}
+  <h3>Sources</h3>
+  <ul>
+    {% for source in result.sources %}
+    <li>[{{ source.source_id }}] document {{ source.document_id }} chunk {{ source.chunk_index }} ({{ source.similarity }})</li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="state empty">No sources returned.</p>
+  {% endif %}
+</article>
+{% endif %}

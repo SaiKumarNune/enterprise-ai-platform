@@ -28,7 +28,9 @@ for path in (str(ROOT), str(BACKEND)):
 from app.services.authorization import Principal  # noqa: E402
 from app.services.rag import INSUFFICIENT_ANSWER, answer_question  # noqa: E402
 from app.services.retrieval import retrieve_chunks  # noqa: E402
+from eval.classify import classify_rag_failure, failures_by_scenario, scenario_breakdown  # noqa: E402
 from eval.corpus import load_fake_corpus, load_sql_corpus, seed_sql_owner  # noqa: E402
+from eval.hosted import HostedLLMError, build_hosted_client, probe_hosted_environment  # noqa: E402
 from eval.live import not_run_report, probe_live_environment  # noqa: E402
 from eval.metrics import claim_coverage, citation_precision, mean, mrr, recall_at_k  # noqa: E402
 from eval.reporting import compare_baseline, load_json, write_report  # noqa: E402
@@ -65,6 +67,7 @@ class CaseResult:
     latency_ms: int
     injection_blocked: bool | None
     llm_judge_faithful: bool | None
+    failure_layer: str | None
     expected: dict
     observed: dict
     passed: bool
@@ -78,6 +81,15 @@ class DatasetLLM:
             return INSUFFICIENT_ANSWER
         if "PWNED" in user_prompt and "lost badges" in user_prompt.lower():
             return "Lost badges must be reported to security within 2 hours [S1]."
+        lowered = user_prompt.lower()
+        if "encryption" in lowered and "PWNED" in user_prompt:
+            return "Laptop encryption must stay enabled at all times [S1]."
+        if "superseded 2024" in lowered or "2024 handbook" in lowered:
+            return "The superseded 2024 handbook granted 12 vacation days [S1]."
+        if "2026 handbook" in lowered:
+            return "The current 2026 handbook grants 15 vacation days each calendar year [S1]."
+        if "vacation days and sick days" in lowered:
+            return "Employees receive vacation days and sick days under the leave policy [S1]."
         if "15 vacation days" in user_prompt:
             return "Full-time employees receive 15 vacation days each calendar year [S1]."
         if "doctor's note" in user_prompt.lower() or "sick days" in user_prompt.lower():
@@ -92,8 +104,10 @@ def load_dataset(path: Path) -> dict:
 def run_eval(dataset_path: Path, top_k: int, *, mode: str = "offline_mock", llm_judge: bool = False) -> dict:
     if mode == "live":
         return run_live_eval(dataset_path, top_k, llm_judge=llm_judge)
+    if mode == "hosted":
+        return run_hosted_eval(dataset_path, top_k, llm_judge=llm_judge)
     if mode not in {"offline_mock", "offline"}:
-        raise ValueError("mode must be offline_mock or live")
+        raise ValueError("mode must be offline_mock, live, or hosted")
     dataset = load_dataset(dataset_path)
     embedder = HashEmbedder()
     llm = DatasetLLM()
@@ -127,6 +141,7 @@ def run_eval(dataset_path: Path, top_k: int, *, mode: str = "offline_mock", llm_
             "notes": [
                 "These checks are deterministic heuristics, not human answer-quality scores.",
                 "Valid citations are not proof that an answer is factually correct.",
+                "Mock HashEmbedder/DatasetLLM scores are not MiniLM, Ollama, or hosted-model accuracy.",
             ],
         }
     )
@@ -202,6 +217,73 @@ def run_live_eval(dataset_path: Path, top_k: int, *, llm_judge: bool) -> dict:
     return report
 
 
+def run_hosted_eval(dataset_path: Path, top_k: int, *, llm_judge: bool) -> dict:
+    dataset = load_dataset(dataset_path)
+    probe = probe_hosted_environment()
+    if not probe.ready:
+        report = not_run_report(
+            title="RAG evaluation",
+            dataset_version=str(dataset.get("version")),
+            reason=probe.reason,
+        )
+        report["dataset"] = dataset_path.name
+        report["mode"] = "hosted_not_run"
+        report["metric_definitions"] = METRIC_DEFINITIONS
+        return report
+    from app.services.embeddings import SentenceTransformerEmbedder
+    from eval.store import close_isolated, isolated_session_factory
+
+    embedder = SentenceTransformerEmbedder(probe.embedder_id, 384)
+    llm = build_hosted_client()
+    factory, engine = isolated_session_factory(probe.database_url)
+    try:
+        session = factory()
+        try:
+            owner = seed_sql_owner(session)
+            document_ids, chunk_ids = load_sql_corpus(session, dataset, embedder, owner)
+            session.commit()
+            report = _evaluate_cases(
+                dataset=dataset,
+                session=session,
+                embedder=embedder,
+                llm=llm,
+                owner=owner,
+                document_ids=document_ids,
+                chunk_ids=chunk_ids,
+                top_k=top_k,
+                llm_judge=llm_judge,
+            )
+        finally:
+            session.close()
+    finally:
+        close_isolated(engine)
+    report.update(
+        {
+            "title": "RAG evaluation",
+            "dataset": dataset_path.name,
+            "dataset_version": dataset.get("version"),
+            "mode": "hosted_openai_compatible",
+            "embedder": probe.embedder_id,
+            "llm": probe.llm_id,
+            "top_k": top_k,
+            "metric_definitions": METRIC_DEFINITIONS,
+            "limitations": [
+                "Hosted-model scores are not comparable to HashEmbedder mock scores or local Ollama scores.",
+                "This runner does not claim production accuracy.",
+                "LLM-as-judge is optional, labeled, and excluded from default regression gates.",
+                f"Isolated database {probe.database_name} was used; development enterprise_ai was not mutated.",
+            ],
+            "notes": [
+                "Hosted mode used MiniLM retrieval plus an OpenAI-compatible chat completions endpoint.",
+                "No paid API is required unless you choose to point EVAL_HOSTED_LLM_* at a vendor.",
+            ],
+        }
+    )
+    report["passed"] = all(case["passed"] for case in report["cases"])
+    report["status"] = "completed"
+    return report
+
+
 def _evaluate_cases(
     *,
     dataset: dict,
@@ -255,14 +337,18 @@ def _evaluate_cases(
         expected_abstain = bool(case.get("expect_abstain"))
         judge = None
         if llm_judge and not answer.abstained:
-            judge = _llm_judge(llm, evidence_text, answer.answer)
+            try:
+                judge = _llm_judge(llm, evidence_text, answer.answer)
+            except HostedLLMError:
+                judge = None
         passed = answer.abstained == expected_abstain
         if injection_blocked is False:
             passed = False
+        recall = recall_at_k(retrieved_ids, gold)
         result = CaseResult(
             case_id=case["id"],
             case_type=case["type"],
-            recall_at_k=recall_at_k(retrieved_ids, gold),
+            recall_at_k=recall,
             mrr=mrr(retrieved_ids, gold),
             cited_valid_ids=cited_valid,
             citation_precision=citation_precision(cited_chunk_ids, gold) if cited_chunk_ids else None,
@@ -274,6 +360,14 @@ def _evaluate_cases(
             latency_ms=latency_ms,
             injection_blocked=injection_blocked,
             llm_judge_faithful=judge,
+            failure_layer=classify_rag_failure(
+                passed=passed,
+                gold_chunk_ids=list(case.get("gold_chunk_ids") or []),
+                recall_at_k=recall,
+                abstain_match=answer.abstained == expected_abstain,
+                injection_blocked=injection_blocked,
+                citation_valid=cited_valid,
+            ),
             expected={"abstain": expected_abstain, "gold_chunk_ids": case.get("gold_chunk_ids", [])},
             observed={
                 "abstain": answer.abstained,
@@ -306,6 +400,8 @@ def _evaluate_cases(
             if not judge_values
             else round(sum(1 for value in judge_values if value) / len(judge_values), 4),
         },
+        "scenario_breakdown": scenario_breakdown([asdict(item) for item in results]),
+        "failures_by_scenario": failures_by_scenario([asdict(item) for item in results]),
         "cases": [asdict(item) for item in results],
     }
 
@@ -331,8 +427,12 @@ def main() -> None:
     parser.add_argument("--dataset", type=Path, default=DATASET)
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--output", type=Path, default=None)
-    parser.add_argument("--mode", choices=("offline_mock", "live"), default="offline_mock")
-    parser.add_argument("--llm-judge", action="store_true", help="Live-only LLM-as-judge (not a CI gate).")
+    parser.add_argument("--mode", choices=("offline_mock", "live", "hosted"), default="offline_mock")
+    parser.add_argument(
+        "--llm-judge",
+        action="store_true",
+        help="Optional LLM-as-judge for live or hosted mode (not a CI gate).",
+    )
     parser.add_argument("--baseline", type=Path, default=None)
     parser.add_argument(
         "--max-drop",
@@ -342,8 +442,8 @@ def main() -> None:
         help="Deterministic regression drop, e.g. recall_at_k=0.15. Ignored for llm_judge_faithfulness.",
     )
     args = parser.parse_args()
-    if args.mode != "live" and args.llm_judge:
-        raise SystemExit(" --llm-judge requires --mode live")
+    if args.mode not in {"live", "hosted"} and args.llm_judge:
+        raise SystemExit(" --llm-judge requires --mode live or --mode hosted")
     report = run_eval(args.dataset, args.top_k, mode=args.mode, llm_judge=args.llm_judge)
     if args.baseline is not None and report.get("status") == "completed":
         drops = {}

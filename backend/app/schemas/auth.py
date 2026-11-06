@@ -11,6 +11,7 @@ class RegisterRequest(BaseModel):
 
     email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=10, max_length=128)
+    invite_token: str | None = Field(default=None, max_length=128)
 
     @field_validator("email")
     @classmethod
@@ -26,6 +27,13 @@ class RegisterRequest(BaseModel):
         if not value.strip() or value != value.strip():
             raise ValueError("must not be blank or padded with whitespace")
         return value
+
+    @field_validator("invite_token")
+    @classmethod
+    def empty_invite_is_none(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        return value.strip()
 
 
 class LoginRequest(BaseModel):

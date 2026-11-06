@@ -31,16 +31,25 @@ def _registration_tenant_id() -> UUID:
     return GREENFIELD_TENANT_ID
 
 
-def create_employee(db: Session, *, email: str, password: str) -> User:
+def create_employee(
+    db: Session,
+    *,
+    email: str,
+    password: str | None = None,
+    tenant_id: UUID | None = None,
+    commit: bool = True,
+) -> User:
     user = User(
         id=uuid4(),
         email=normalize_email(email),
-        tenant_id=_registration_tenant_id(),
-        password_hash=hash_password(password),
+        tenant_id=tenant_id or _registration_tenant_id(),
+        password_hash=hash_password(password) if password else None,
         role=EMPLOYEE,
         is_active=True,
     )
     db.add(user)
+    if not commit:
+        return user
     try:
         db.commit()
     except IntegrityError as exc:

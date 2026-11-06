@@ -8,6 +8,7 @@ def test_live_probe_rejects_development_database(monkeypatch) -> None:
         "postgresql+psycopg://ci_user:ci_test_password_not_for_prod@127.0.0.1:5432/enterprise_ai",
     )
     monkeypatch.delenv("TEST_DATABASE_URL", raising=False)
+    monkeypatch.delenv("BENCH_DATABASE_URL", raising=False)
     probe = probe_live_environment(require_llm=False)
     assert probe.ready is False
     assert "development" in probe.reason.lower() or "enterprise_ai" in probe.reason.lower()
@@ -16,6 +17,7 @@ def test_live_probe_rejects_development_database(monkeypatch) -> None:
 def test_rag_live_mode_does_not_fall_back_to_mocks(monkeypatch) -> None:
     monkeypatch.delenv("EVAL_DATABASE_URL", raising=False)
     monkeypatch.delenv("TEST_DATABASE_URL", raising=False)
+    monkeypatch.delenv("BENCH_DATABASE_URL", raising=False)
     report = run_eval(DATASET, 5, mode="live")
     assert report["status"] == "not_run"
     assert report["mode"] == "live_not_run"
@@ -23,3 +25,19 @@ def test_rag_live_mode_does_not_fall_back_to_mocks(monkeypatch) -> None:
     assert report.get("llm") not in {"DatasetLLM"}
     blob = " ".join(report.get("notes") or []) + " ".join(report.get("limitations") or [])
     assert "fall back" in blob.lower() or "HashEmbedder" in blob
+
+
+def test_hosted_mode_does_not_fall_back_or_call_paid_api(monkeypatch) -> None:
+    monkeypatch.delenv("EVAL_HOSTED_LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("EVAL_HOSTED_LLM_MODEL", raising=False)
+    monkeypatch.delenv("EVAL_HOSTED_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("EVAL_DATABASE_URL", raising=False)
+    monkeypatch.delenv("TEST_DATABASE_URL", raising=False)
+    monkeypatch.delenv("BENCH_DATABASE_URL", raising=False)
+    report = run_eval(DATASET, 5, mode="hosted")
+    assert report["status"] == "not_run"
+    assert report["mode"] == "hosted_not_run"
+    assert report.get("embedder") not in {"HashEmbedder"}
+    assert report.get("llm") not in {"DatasetLLM"}
+    blob = " ".join(report.get("notes") or []) + " ".join(report.get("limitations") or [])
+    assert "paid" in blob.lower() or "HOSTED" in blob

@@ -12,7 +12,20 @@ def test_offline_rag_eval_reports_defined_metrics() -> None:
     report = run_eval(DATASET, top_k=5)
 
     assert report["mode"] == "offline_mock"
-    assert report["aggregates"]["n_cases"] == 5
+    assert report["aggregates"]["n_cases"] == 11
+    assert set(report["aggregates"]) >= {
+        "n_cases",
+        "recall_at_k",
+        "mrr",
+        "citation_validity_rate",
+        "citation_precision",
+        "abstention_accuracy",
+    }
+    types = {item["case_type"] for item in report["cases"]}
+    assert {"paraphrase", "ambiguous", "conflicting", "outdated", "missing_evidence", "prompt_injection"} <= types
+    assert "scenario_breakdown" in report
+    assert report["failures_by_scenario"] == {}
+    assert report["passed"] is True
     recall = report["aggregates"]["recall_at_k"]
     citation_rate = report["aggregates"]["citation_validity_rate"]
     assert recall is None or 0.0 <= recall <= 1.0

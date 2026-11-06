@@ -1,0 +1,36 @@
+<section id="documents-panel">
+  <form class="card stack" method="post" action="/app/documents/upload" enctype="multipart/form-data"
+        hx-post="/app/documents/upload" hx-target="#documents-panel" hx-swap="outerHTML">
+    <label>File (PDF or text)
+      <input type="file" name="file" required accept=".pdf,.txt,application/pdf,text/plain">
+    </label>
+    <div class="row">
+      <button type="submit">Upload and enqueue</button>
+      <span class="loading" hidden>Uploading…</span>
+    </div>
+  </form>
+  {% if error %}
+  <p class="state error" role="alert">{{ error }}</p>
+  {% endif %}
+  {% if job %}
+  {% include "partials/job_status.html" %}
+  {% endif %}
+  {% if documents %}
+  <table class="table">
+    <thead>
+      <tr><th>File</th><th>Status</th><th>Updated</th></tr>
+    </thead>
+    <tbody>
+      {% for doc in documents %}
+      <tr>
+        <td>{{ doc.filename }}</td>
+        <td><span class="pill">{{ doc.status }}</span></td>
+        <td>{{ doc.updated_at }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="state empty">No documents yet. Upload a PDF or text file to start.</p>
+  {% endif %}
+</section>

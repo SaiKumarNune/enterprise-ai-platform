@@ -53,6 +53,37 @@ def markdown_report(report: dict[str, Any]) -> str:
     if notes:
         lines.extend(["", "## Notes", ""])
         lines.extend(f"- {note}" for note in notes)
+    breakdown = report.get("scenario_breakdown")
+    if isinstance(breakdown, dict) and breakdown:
+        lines.extend(["", "## Scenario breakdown", "", "| Scenario | n | passed | failed | failure layers |", "|---|---:|---:|---:|---|"])
+        for name, bucket in breakdown.items():
+            layers = bucket.get("failure_layers") or {}
+            layer_text = ", ".join(f"{key}={value}" for key, value in layers.items()) or "—"
+            lines.append(
+                f"| {name} | {bucket.get('n')} | {bucket.get('passed')} | {bucket.get('failed')} | {layer_text} |"
+            )
+    grouped_failures = report.get("failures_by_scenario")
+    if isinstance(grouped_failures, dict) and grouped_failures:
+        lines.extend(["", "## Failures by scenario", ""])
+        for scenario, rows in grouped_failures.items():
+            lines.append(f"- `{scenario}`")
+            for row in rows:
+                lines.append(f"  - `{row.get('case_id')}` layer=`{row.get('failure_layer')}`")
+    scenarios = report.get("scenarios")
+    if isinstance(scenarios, list) and scenarios:
+        lines.extend(["", "## Scenarios", ""])
+        for item in scenarios:
+            lines.append(
+                f"- `{item.get('id')}` layer=`{item.get('layer')}` "
+                f"status={item.get('status')} rps={item.get('rps')} "
+                f"p50_ms={item.get('p50_ms')} p95_ms={item.get('p95_ms')} "
+                f"p99_ms={item.get('p99_ms')} error_rate={item.get('error_rate')}"
+            )
+    nested = report.get("reports")
+    if isinstance(nested, list):
+        lines.extend(["", "## Nested reports", ""])
+        for item in nested:
+            lines.append(f"- mode=`{item.get('mode')}` status={item.get('status')}")
     cases = report.get("cases")
     if isinstance(cases, list):
         lines.extend(["", "## Cases", ""])
@@ -60,8 +91,10 @@ def markdown_report(report: dict[str, Any]) -> str:
             expected = case.get("expected")
             observed = case.get("observed", case)
             passed = case.get("passed")
+            layer = case.get("failure_layer")
+            layer_bit = f" layer={layer}" if layer else ""
             lines.append(
-                f"- `{case.get('case_id')}` passed={passed} expected={expected} observed={observed}"
+                f"- `{case.get('case_id')}` passed={passed}{layer_bit} expected={expected} observed={observed}"
             )
     elif isinstance(cases, dict):
         lines.extend(["", "## Cases", ""])

@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.mcp.client import invoke_prepare_approval_request
+from uuid import UUID
+
+from app.mcp.client import invoke_create_ticket, invoke_prepare_approval_request
+from app.mcp.errors import McpToolError
 from app.services.agent_tools import dispatch_tool
 from app.services.agents.research import selected_from_excerpts
 from app.services.authorization import Principal
+from app.services.ticketing import TicketingDisabledError
 from app.services.llm import LLMBackend
 from app.services.rag import build_user_prompt, source_dicts_for_citations
 
@@ -51,6 +55,37 @@ def execute_simulated_action(*, draft: dict[str, Any], authorized: bool) -> dict
         draft=draft,
         authorized=authorized,
     )
+
+
+def execute_approved_ticket(
+    *,
+    draft: dict[str, Any],
+    principal: Principal,
+    workflow_id: str,
+    authorized: bool,
+) -> dict[str, Any]:
+    if not authorized:
+        raise McpToolError("forbidden", "Ticket creation requires an explicit API approval")
+    try:
+        return invoke_create_ticket(
+            principal=principal,
+            title=str(draft.get("title") or ""),
+            description=str(draft.get("description") or ""),
+            priority=str(draft.get("priority") or "medium"),
+            workflow_id=UUID(workflow_id),
+        )
+    except (TicketingDisabledError, McpToolError) as exc:
+        message = getattr(exc, "message", str(exc))
+        code = getattr(exc, "code", "")
+        if code == "disabled" or "disabled" in message.lower():
+            return {
+                "simulated": True,
+                "created": False,
+                "action_type": "create_ticket",
+                "reason": "ticketing_disabled",
+                "message": "Ticketing is disabled. No ticket was created.",
+            }
+        raise
 
 
 def cited_sources(sources: list[dict[str, Any]], draft: dict[str, Any]) -> list[dict[str, Any]]:

@@ -24,9 +24,20 @@ python eval/run_retrieval_eval.py --mode live --output /tmp/retrieval_live.json
 python eval/run_rag_eval.py --mode live --llm-judge
 ```
 
-If live dependencies are missing the runner prints `status: not_run` and exits 2.
+Hosted OpenAI-compatible generation is a third labeled mode. It is `not_run` unless `EVAL_HOSTED_LLM_BASE_URL` and `EVAL_HOSTED_LLM_MODEL` are set, plus an isolated `*_test` database and cached MiniLM. An API key is optional. Hosted mode never falls back to DatasetLLM or Ollama.
+
+```bash
+# Example using a local compatible proxy (no paid vendor required):
+export EVAL_HOSTED_LLM_BASE_URL='http://127.0.0.1:11434/v1'
+export EVAL_HOSTED_LLM_MODEL='llama3.2:3b'
+python eval/run_rag_eval.py --mode hosted --output /tmp/rag_hosted.json
+```
+
+If live or hosted dependencies are missing the runner prints `status: not_run` and exits 2.
 
 Agent live Ollama planning is not enabled by default (planner JSON is nondeterministic). MCP evaluation is in-process and does not need PostgreSQL.
+
+Reports keep `mode` labels separate: `offline_mock`, `live`, `hosted_openai_compatible`, or `*_not_run`. Do not mix those aggregates. Failures are grouped by scenario with a heuristic `failure_layer` of `retrieval`, `generation`, or `authorization`.
 
 ## Metric definitions
 
@@ -43,4 +54,6 @@ Agent live Ollama planning is not enabled by default (planner JSON is nondetermi
 
 Deterministic regression example: `python eval/run_rag_eval.py --baseline /tmp/prev.json --max-drop recall_at_k=0.15`
 
-Do not treat mock aggregates as MiniLM or Ollama quality. Mock and live reports are separate `mode` values.
+Do not treat mock aggregates as MiniLM, Ollama, or hosted-model quality. Mock, live, and hosted reports are separate `mode` values and are not production accuracy.
+
+`rag_quality_v1.json` version 1.2 covers answerable, paraphrase, ambiguous, conflicting, outdated, missing-evidence, and prompt-injection cases. `agent_orchestration_v1.json` version 1.1 adds ticket prepare/approve/reject, unauthorized execution, and disabled integration. `mcp_security_v1.json` version 1.1 adds ticket tool authorization and identity-boundary cases. Retrieval datasets and metrics are unchanged.

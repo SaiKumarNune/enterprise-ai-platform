@@ -25,7 +25,11 @@ class LiveProbe:
 
 
 def evaluation_database_url() -> str:
-    return os.getenv("EVAL_DATABASE_URL", "").strip() or os.getenv("TEST_DATABASE_URL", "").strip()
+    return (
+        os.getenv("BENCH_DATABASE_URL", "").strip()
+        or os.getenv("EVAL_DATABASE_URL", "").strip()
+        or os.getenv("TEST_DATABASE_URL", "").strip()
+    )
 
 
 def probe_live_environment(*, require_llm: bool) -> LiveProbe:

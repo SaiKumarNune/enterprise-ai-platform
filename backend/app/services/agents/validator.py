@@ -102,7 +102,11 @@ def validate_workflow(state: dict[str, Any]) -> dict[str, Any]:
             }
 
     if intent == "draft_action":
-        _validate_leave(request, draft, excerpts, valid_ids, rules, issues)
+        action_type = (draft or {}).get("action_type")
+        if action_type == "create_ticket":
+            _validate_ticket(draft, issues)
+        else:
+            _validate_leave(request, draft, excerpts, valid_ids, rules, issues)
     else:
         _validate_informational(corrected, valid_ids, issues)
 
@@ -243,6 +247,57 @@ def _validate_informational(answer: str, valid_ids: set[str], issues: list[dict[
                 "severity": "warning",
             }
         )
+
+
+def _validate_ticket(draft: dict[str, Any] | None, issues: list[dict[str, str]]) -> None:
+    from app.services.ticketing import ALLOWED_PRIORITIES
+
+    if not draft:
+        issues.append(
+            {
+                "code": "missing_ticket_draft",
+                "message": "No ticket draft is available.",
+                "severity": "error",
+            }
+        )
+        return
+    title = str(draft.get("title") or "").strip()
+    description = str(draft.get("description") or "").strip()
+    priority = str(draft.get("priority") or "").strip().lower()
+    if len(title) < 3:
+        issues.append(
+            {
+                "code": "invalid_ticket_title",
+                "message": "Ticket title is required.",
+                "severity": "error",
+            }
+        )
+    if not description:
+        issues.append(
+            {
+                "code": "invalid_ticket_description",
+                "message": "Ticket description is required.",
+                "severity": "error",
+            }
+        )
+    if priority not in ALLOWED_PRIORITIES:
+        issues.append(
+            {
+                "code": "invalid_ticket_priority",
+                "message": "Ticket priority is not allowed.",
+                "severity": "error",
+            }
+        )
+    for forbidden in ("tenant_id", "user_id", "requester_user_id", "authorized"):
+        if forbidden in draft:
+            issues.append(
+                {
+                    "code": "identity_in_ticket_draft",
+                    "message": "Ticket drafts must not carry identity or authorization fields.",
+                    "severity": "error",
+                }
+            )
+            break
 
 
 def _validate_leave(

@@ -1,0 +1,18 @@
+{% if error %}
+<p class="state error" role="alert">{{ error }}</p>
+{% elif hits is none %}
+<p class="state empty">Submit a query to retrieve authorized chunks.</p>
+{% elif empty_query %}
+<p class="state empty">Enter a search query.</p>
+{% elif hits|length == 0 %}
+<p class="state empty">No matching chunks in documents you can read.</p>
+{% else %}
+<ul class="results">
+  {% for hit in hits %}
+  <li class="card">
+    <p class="meta">{{ hit.retrieval_mode or "hit" }} · score {{ hit.similarity }} · chunk {{ hit.chunk_index }}</p>
+    <p>{{ hit.content }}</p>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}

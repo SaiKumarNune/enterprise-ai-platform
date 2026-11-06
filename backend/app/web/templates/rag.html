@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Ask{% endblock %}
+{% block content %}
+<h1>Ask</h1>
+<p class="lede">Uses <code>/rag/ask</code>. Answers may abstain when evidence is insufficient.</p>
+<form class="card stack" method="post" action="/app/ask"
+      hx-post="/app/ask" hx-target="#rag-result" hx-swap="innerHTML">
+  <label>Question
+    <textarea name="question" rows="3" required maxlength="2000">{{ question }}</textarea>
+  </label>
+  <div class="row">
+    <button type="submit">Ask</button>
+    <span class="loading" hidden>Retrieving and generating…</span>
+  </div>
+</form>
+<div id="rag-result">
+  {% include "partials/rag_result.html" %}
+</div>
+{% endblock %}

@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Search{% endblock %}
+{% block content %}
+<h1>Search</h1>
+<p class="lede">Modes map to the existing <code>/search</code> API: lexical FTS, semantic cosine, or hybrid RRF.</p>
+<form class="card stack" method="post" action="/app/search"
+      hx-post="/app/search" hx-target="#search-results" hx-swap="innerHTML">
+  <label>Query
+    <input type="text" name="query" value="{{ query }}" required maxlength="2000">
+  </label>
+  <label>Mode
+    <select name="retrieval_mode">
+      <option value="hybrid" {% if retrieval_mode == "hybrid" %}selected{% endif %}>Hybrid</option>
+      <option value="lexical" {% if retrieval_mode == "lexical" %}selected{% endif %}>Lexical</option>
+      <option value="semantic" {% if retrieval_mode == "semantic" %}selected{% endif %}>Semantic</option>
+    </select>
+  </label>
+  <div class="row">
+    <button type="submit">Search</button>
+    <span class="loading" hidden>Searching…</span>
+  </div>
+</form>
+<div id="search-results">
+  {% include "partials/search_results.html" %}
+</div>
+{% endblock %}

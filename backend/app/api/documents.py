@@ -3,7 +3,7 @@ from typing import Annotated
 from urllib.parse import quote
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -17,6 +17,7 @@ from app.models.document import Document
 from app.models.user import User
 from app.schemas.chunk import DocumentChunkResponse
 from app.schemas.document import DocumentCreate, DocumentResponse, DocumentUpdate
+from app.schemas.processing_job import ProcessingJobResponse
 from app.schemas.permission import PermissionGrantRequest, PermissionGrantResponse
 from app.services.audit import record_audit
 from app.services.authorization import (
@@ -29,6 +30,7 @@ from app.services.authorization import (
 from app.services.embeddings import EmbeddingBackend, EmbeddingError, get_embedder
 from app.services.extraction import EmptyDocumentError, ExtractionError
 from app.services.ingestion import IngestionConflictError, process_stored_document
+from app.services.processing_jobs import JobEnqueueError, enqueue_processing_job, get_job
 from app.services.permissions import PermissionError, grant_privilege, list_grants, revoke_privilege
 from app.services.storage import (
     FileTooLargeError,
@@ -218,15 +220,46 @@ def update_document(
     return document
 
 
-@router.post("/documents/{document_id}/process", response_model=DocumentResponse)
+@router.post(
+    "/documents/{document_id}/process",
+    response_model=DocumentResponse | ProcessingJobResponse,
+    responses={
+        200: {"model": DocumentResponse},
+        202: {"model": ProcessingJobResponse},
+    },
+)
 def process_document(
     document_id: UUID,
     user: CurrentUser,
+    response: Response,
     db: Session = Depends(get_db),
     storage: LocalStorage = Depends(get_storage),
     embedder: EmbeddingBackend = Depends(get_embedder),
-) -> Document:
+    wait: bool = Query(
+        True,
+        description="If true (default), process on this request. If false, enqueue a durable job and return 202.",
+    ),
+) -> Document | ProcessingJobResponse:
     document = _authorized_document(db, _principal(user), document_id, "write")
+    if not wait:
+        try:
+            if document.storage_path:
+                storage.resolve(document.storage_path)
+            job = enqueue_processing_job(db, document, _principal(user))
+        except StoredFileMissingError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Stored file not found",
+            ) from exc
+        except JobEnqueueError as exc:
+            code = (
+                status.HTTP_409_CONFLICT
+                if exc.code == "conflict"
+                else status.HTTP_404_NOT_FOUND
+            )
+            raise HTTPException(status_code=code, detail=exc.message) from exc
+        response.status_code = status.HTTP_202_ACCEPTED
+        return ProcessingJobResponse.model_validate(job)
     try:
         return process_stored_document(
             db,
@@ -268,6 +301,26 @@ def process_document(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Document processing failed",
         ) from exc
+
+
+@router.get(
+    "/documents/{document_id}/processing-jobs/{job_id}",
+    response_model=ProcessingJobResponse,
+)
+def get_processing_job(
+    document_id: UUID,
+    job_id: UUID,
+    user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> ProcessingJobResponse:
+    _authorized_document(db, _principal(user), document_id, "read")
+    job = get_job(db, job_id)
+    if job is None or job.document_id != document_id:
+        raise _not_found()
+    principal = _principal(user)
+    if job.tenant_id != principal.tenant_id:
+        raise _not_found()
+    return ProcessingJobResponse.model_validate(job)
 
 
 @router.get(

@@ -12,13 +12,21 @@ from sqlalchemy.orm import Session
 from app.services.authorization import Principal
 from app.services.embeddings import EmbeddingBackend
 from app.services.rag import retrieve_evidence, rewrite_citations
+from app.services.ticketing import ALLOWED_PRIORITIES, is_ticket_request
 
 ALLOWED_TOOLS = frozenset(
-    {"knowledge_search", "prepare_approval_request", "execute_approved_action"}
+    {
+        "knowledge_search",
+        "prepare_approval_request",
+        "prepare_ticket",
+        "execute_approved_action",
+    }
 )
 ALLOWED_INTENTS = frozenset({"informational", "draft_action", "clarification"})
-ALLOWED_ACTION_TYPES = frozenset({"leave_request"})
-PLANNER_TOOLS = frozenset({"knowledge_search", "prepare_approval_request", "none", None})
+ALLOWED_ACTION_TYPES = frozenset({"leave_request", "create_ticket"})
+PLANNER_TOOLS = frozenset(
+    {"knowledge_search", "prepare_approval_request", "prepare_ticket", "none", None}
+)
 
 LEAVE_HINTS = (
     "approval request",
@@ -133,7 +141,7 @@ def parse_planner_output(raw: str, request: str) -> dict[str, Any]:
     if intent != "draft_action":
         action_type = None
     elif action_type is None:
-        action_type = "leave_request"
+        action_type = "create_ticket" if is_ticket_request(request) else "leave_request"
     return {
         "intent": intent,
         "tool": tool or "knowledge_search",
@@ -189,7 +197,7 @@ def prepare_approval_request(
     valid_source_ids: set[str],
     action_type: str | None,
 ) -> dict[str, Any] | None:
-    if action_type not in ALLOWED_ACTION_TYPES:
+    if action_type != "leave_request":
         return None
     payload = _extract_json(raw_draft) or {}
     days = _parse_days(request)
@@ -239,6 +247,59 @@ def prepare_approval_request(
     }
 
 
+def prepare_ticket(
+    *,
+    request: str,
+    raw_draft: str,
+    valid_source_ids: set[str],
+) -> dict[str, Any] | None:
+    payload = _extract_json(raw_draft) or {}
+    title = _clean_ticket_text(payload.get("title")) or _default_ticket_title(request)
+    description = _clean_ticket_text(payload.get("description")) or " ".join(request.split())
+    priority = str(payload.get("priority") or "medium").strip().lower()
+    if priority not in ALLOWED_PRIORITIES:
+        priority = "medium"
+    if title is None or description is None:
+        return None
+    source_ids = []
+    had_invalid = False
+    requested_ids = payload.get("source_ids") or []
+    if isinstance(requested_ids, list):
+        for label in requested_ids:
+            if not isinstance(label, str):
+                continue
+            if label in valid_source_ids:
+                if label not in source_ids:
+                    source_ids.append(label)
+            else:
+                had_invalid = True
+    return {
+        "action_type": "create_ticket",
+        "title": title,
+        "description": description,
+        "priority": priority,
+        "source_ids": source_ids,
+        "requires_approval": True,
+        "had_invalid_citations": had_invalid,
+    }
+
+
+def _clean_ticket_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = " ".join(value.split())
+    if not text or text.lower() in {"not provided", "none", "null", "n/a"}:
+        return None
+    return text
+
+
+def _default_ticket_title(request: str) -> str | None:
+    text = " ".join(request.split())
+    if len(text) < 3:
+        return None
+    return text[:120]
+
+
 def execute_approved_action(
     *,
     draft: dict[str, Any],
@@ -246,7 +307,7 @@ def execute_approved_action(
 ) -> dict[str, Any]:
     if not authorized:
         raise ToolError("execute_approved_action requires an explicit API approval")
-    if not draft or draft.get("action_type") not in ALLOWED_ACTION_TYPES:
+    if not draft or draft.get("action_type") != "leave_request":
         raise ToolError("draft is not an allowlisted action")
     return {
         "simulated": True,
@@ -263,6 +324,8 @@ def dispatch_tool(name: str, **kwargs: Any) -> Any:
         return knowledge_search(**kwargs)
     if name == "prepare_approval_request":
         return prepare_approval_request(**kwargs)
+    if name == "prepare_ticket":
+        return prepare_ticket(**kwargs)
     if name == "execute_approved_action":
         return execute_approved_action(**kwargs)
     raise ToolError(f"unknown tool: {name}")
@@ -275,6 +338,14 @@ def _fallback_plan(request: str, *, reason: str) -> dict[str, Any]:
             "intent": "draft_action",
             "tool": "knowledge_search",
             "action_type": "leave_request",
+            "planner_fallback": True,
+            "fallback_reason": reason,
+        }
+    if is_ticket_request(request):
+        return {
+            "intent": "draft_action",
+            "tool": "prepare_ticket",
+            "action_type": "create_ticket",
             "planner_fallback": True,
             "fallback_reason": reason,
         }

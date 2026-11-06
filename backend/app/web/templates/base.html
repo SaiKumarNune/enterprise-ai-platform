@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Enterprise AI Platform{% endblock %}</title>
+  <link rel="stylesheet" href="/app/static/styles.css">
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="/app/">Enterprise AI</a>
+    {% if user %}
+    <nav>
+      <a href="/app/documents">Documents</a>
+      <a href="/app/search">Search</a>
+      <a href="/app/ask">Ask</a>
+      <a href="/app/agents">Agents</a>
+    </nav>
+    <div class="who">
+      <span>{{ user.email }}</span>
+      <span class="role">{{ user.role }}</span>
+      <form method="post" action="/app/logout"><button type="submit" class="linkish">Sign out</button></form>
+    </div>
+    {% endif %}
+  </header>
+  <main class="shell">
+    {% block content %}{% endblock %}
+  </main>
+  <script src="/app/static/app.js"></script>
+</body>
+</html>

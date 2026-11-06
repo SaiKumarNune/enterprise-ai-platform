@@ -6,27 +6,45 @@ from uuid import UUID
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.fastmcp.server import Settings as FastMCPSettings
+
+# FastMCP Settings.lifespan annotates FastMCP before the class body finishes.
+FastMCPSettings.model_rebuild()
 
 from app.mcp.context import FORBIDDEN_IDENTITY_KEYS, McpExecutionContext
 from app.mcp.errors import McpToolError
 from app.mcp.schemas import (
+    CreateTicketInput,
+    CreateTicketOutput,
     KnowledgeSearchInput,
     KnowledgeSearchOutput,
     PrepareApprovalInput,
     PrepareApprovalOutput,
+    PrepareTicketInput,
+    PrepareTicketOutput,
 )
-from app.services.agent_tools import knowledge_search, prepare_approval_request
+from app.core.config import settings
+from app.services.agent_tools import knowledge_search, prepare_approval_request, prepare_ticket
 from app.services.authorization import DocumentAccessDenied
+from app.services.ticketing import (
+    TicketingDisabledError,
+    TicketingError,
+    get_ticket_adapter,
+    ticket_record_payload,
+)
 
-EXPOSED_TOOLS = frozenset({"knowledge_search", "prepare_approval_request"})
+EXPOSED_TOOLS = frozenset(
+    {"knowledge_search", "prepare_approval_request", "prepare_ticket", "create_ticket"}
+)
 
 
 def build_mcp_server(context: McpExecutionContext) -> FastMCP:
     server = FastMCP(
         "enterprise-ai-platform",
         instructions=(
-            "Local tools for authorized knowledge search and leave-request drafts. "
-            "Simulated execution is not available through MCP."
+            "Local tools for authorized knowledge search, leave-request drafts, "
+            "and mock ticket drafts. Ticket creation is gated on API approval and "
+            "the bound principal; identity arguments are ignored."
         ),
         log_level="ERROR",
     )
@@ -94,6 +112,60 @@ def build_mcp_server(context: McpExecutionContext) -> FastMCP:
             action_type=payload.action_type,
         )
         return PrepareApprovalOutput(draft=draft)
+
+    @server.tool(
+        name="prepare_ticket",
+        description="Prepare a mock helpdesk ticket draft. Does not create a ticket.",
+    )
+    def prepare_ticket_tool(
+        request: str,
+        raw_draft: str,
+        valid_source_ids: list[str] | None = None,
+    ) -> PrepareTicketOutput:
+        _require_active_principal(context)
+        payload = PrepareTicketInput(
+            request=request,
+            raw_draft=raw_draft,
+            valid_source_ids=list(valid_source_ids or []),
+        )
+        draft = prepare_ticket(
+            request=payload.request,
+            raw_draft=payload.raw_draft,
+            valid_source_ids=set(payload.valid_source_ids),
+        )
+        return PrepareTicketOutput(draft=draft)
+
+    @server.tool(
+        name="create_ticket",
+        description="Create a mock helpdesk ticket after explicit API approval. Identity comes from context.",
+    )
+    def create_ticket_tool(
+        title: str,
+        description: str,
+        priority: str = "medium",
+    ) -> CreateTicketOutput:
+        _require_active_principal(context)
+        if not context.execution_authorized:
+            raise McpToolError("forbidden", "Ticket creation requires an explicit API approval")
+        if not settings.ticketing_enabled:
+            raise McpToolError("disabled", "Ticketing is disabled")
+        if context.workflow_id is None:
+            raise McpToolError("invalid_arguments", "Ticket creation requires a bound workflow")
+        payload = CreateTicketInput(title=title, description=description, priority=priority)
+        try:
+            record = get_ticket_adapter().create_ticket(
+                tenant_id=context.principal.tenant_id,
+                requester_user_id=context.principal.user_id,
+                title=payload.title,
+                description=payload.description,
+                priority=payload.priority,
+                idempotency_key=str(context.workflow_id),
+            )
+        except TicketingDisabledError as exc:
+            raise McpToolError(exc.code, exc.message) from exc
+        except TicketingError as exc:
+            raise McpToolError(exc.code, exc.message) from exc
+        return CreateTicketOutput(**ticket_record_payload(record))
 
     _install_argument_guard(server)
     return server

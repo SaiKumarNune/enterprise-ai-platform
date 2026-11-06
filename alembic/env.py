@@ -12,7 +12,19 @@ if backend_path not in sys.path:
 
 from app.core.config import settings
 from app.core.database import Base
-from app.models import AgentWorkflow, AuditEvent, Document, DocumentACL, DocumentChunk, Tenant, User  # noqa: F401
+from app.models import (  # noqa: F401
+    AgentWorkflow,
+    AuditEvent,
+    Document,
+    DocumentACL,
+    DocumentChunk,
+    ExternalIdentity,
+    Invitation,
+    OidcLoginState,
+    ProcessingJob,
+    Tenant,
+    User,
+)
 
 config = context.config
 

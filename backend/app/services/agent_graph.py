@@ -7,7 +7,14 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.services.authorization import Principal
-from app.services.agents.action import cited_sources, execute_simulated_action, prepare_leave_draft
+from app.mcp.errors import McpToolError
+from app.services.agents.action import (
+    cited_sources,
+    execute_approved_ticket,
+    execute_simulated_action,
+    prepare_leave_draft,
+)
+from app.services.agents.tickets import prepare_ticket_draft
 from app.services.agents.planner import run_planner
 from app.services.agents.research import run_research, synthesize_informational_answer
 from app.services.agents.trace import append_trace
@@ -100,7 +107,10 @@ def compile_agent_graph(
         intent = state.get("intent") or "informational"
         grounding_issues: list[dict[str, str]] = []
         if not excerpts:
-            if intent == "draft_action":
+            if intent == "draft_action" and state.get("action_type") == "create_ticket":
+                outcome = "retrieved"
+                summary = "No policy excerpts; ticket drafts do not require leave evidence."
+            elif intent == "draft_action":
                 update.update(_clarification())
                 outcome = "needs_clarification"
                 summary = "No policy evidence retrieved for the leave request."
@@ -150,10 +160,28 @@ def compile_agent_graph(
                         summary="Simulated execution was already recorded.",
                     ),
                 }
-            result = execute_simulated_action(
-                draft=state.get("draft") or {},
-                authorized=bool(state.get("authorized")),
-            )
+            draft = state.get("draft") or {}
+            if draft.get("action_type") == "create_ticket":
+                try:
+                    result = execute_approved_ticket(
+                        draft=draft,
+                        principal=principal,
+                        workflow_id=str(state.get("workflow_id") or ""),
+                        authorized=bool(state.get("authorized")),
+                    )
+                except McpToolError as exc:
+                    return _failed(state, exc.message)
+                summary = (
+                    "Created a mock helpdesk ticket."
+                    if result.get("created")
+                    else result.get("message") or "Ticket execution finished without creating a ticket."
+                )
+            else:
+                result = execute_simulated_action(
+                    draft=draft,
+                    authorized=bool(state.get("authorized")),
+                )
+                summary = "Recorded simulated leave_request execution."
             return {
                 "execution_result": result,
                 "approval_decision": "approved",
@@ -163,17 +191,26 @@ def compile_agent_graph(
                     state,
                     agent="action",
                     outcome="executed",
-                    summary="Recorded simulated leave_request execution.",
+                    summary=summary,
                 ),
             }
-        draft = prepare_leave_draft(
-            llm,
-            request=state["request"],
-            excerpts=state.get("excerpts") or [],
-            sources=state.get("sources") or [],
-            action_type=state.get("action_type"),
-            principal=principal,
-        )
+        if state.get("action_type") == "create_ticket":
+            draft = prepare_ticket_draft(
+                llm,
+                request=state["request"],
+                excerpts=state.get("excerpts") or [],
+                sources=state.get("sources") or [],
+                principal=principal,
+            )
+        else:
+            draft = prepare_leave_draft(
+                llm,
+                request=state["request"],
+                excerpts=state.get("excerpts") or [],
+                sources=state.get("sources") or [],
+                action_type=state.get("action_type"),
+                principal=principal,
+            )
         if draft is None:
             update = _clarification()
             update.update(
@@ -203,7 +240,11 @@ def compile_agent_graph(
                 state,
                 agent="action",
                 outcome="drafted",
-                summary="Prepared a leave_request draft; execution is not authorized.",
+                summary=(
+                    "Prepared a create_ticket draft; execution is not authorized."
+                    if (draft or {}).get("action_type") == "create_ticket"
+                    else "Prepared a leave_request draft; execution is not authorized."
+                ),
             ),
         }
 
@@ -272,7 +313,7 @@ def compile_agent_graph(
                 state,
                 agent="action",
                 outcome="pending_approval",
-                summary="Waiting for an explicit API approval before simulated execution.",
+                summary="Waiting for an explicit API approval before execution.",
             ),
         }
 
@@ -364,7 +405,7 @@ def _route_after_research(state: AgentState) -> str:
     if (
         state.get("intent") == "draft_action"
         and state.get("status") == "running"
-        and state.get("excerpts")
+        and (state.get("excerpts") or state.get("action_type") == "create_ticket")
     ):
         return "action_agent"
     return "validator_agent"
