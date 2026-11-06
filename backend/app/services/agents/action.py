@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.mcp.client import invoke_prepare_approval_request
 from app.services.agent_tools import dispatch_tool
 from app.services.agents.research import selected_from_excerpts
+from app.services.authorization import Principal
 from app.services.llm import LLMBackend
 from app.services.rag import build_user_prompt, source_dicts_for_citations
 
@@ -25,6 +27,7 @@ def prepare_leave_draft(
     excerpts: list[dict[str, Any]],
     sources: list[dict[str, Any]],
     action_type: str | None,
+    principal: Principal,
 ) -> dict[str, Any] | None:
     valid_ids = {item["source_id"] for item in sources}
     selected = selected_from_excerpts(excerpts, sources)
@@ -32,8 +35,8 @@ def prepare_leave_draft(
         DRAFT_PROMPT,
         build_user_prompt(request, selected),
     )
-    draft = dispatch_tool(
-        "prepare_approval_request",
+    draft = invoke_prepare_approval_request(
+        principal=principal,
         request=request,
         raw_draft=raw_draft,
         valid_source_ids=valid_ids,

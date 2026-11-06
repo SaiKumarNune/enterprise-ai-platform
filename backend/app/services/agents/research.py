@@ -5,8 +5,9 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from app.services.agent_tools import dispatch_tool
-from app.services.authorization import Principal
+from app.mcp.client import invoke_knowledge_search
+from app.mcp.errors import McpToolError
+from app.services.authorization import DocumentAccessDenied, Principal
 from app.services.embeddings import EmbeddingBackend
 from app.services.llm import LLMBackend
 from app.services.agents.validator import ground_informational_answer
@@ -29,15 +30,20 @@ def run_research(
     principal: Principal,
 ) -> dict[str, Any]:
     parsed_document_id = UUID(document_id) if document_id else None
-    result = dispatch_tool(
-        "knowledge_search",
-        db=db,
-        embedder=embedder,
-        question=question,
-        top_k=top_k,
-        document_id=parsed_document_id,
-        principal=principal,
-    )
+    try:
+        result = invoke_knowledge_search(
+            db=db,
+            embedder=embedder,
+            principal=principal,
+            question=question,
+            top_k=top_k,
+            document_id=parsed_document_id,
+        )
+    except McpToolError as exc:
+        lowered = exc.message.lower()
+        if "not found" in lowered or "not authorized" in lowered:
+            raise DocumentAccessDenied("document") from exc
+        raise
     return {
         "excerpts": result["excerpts"],
         "sources": result["sources"],

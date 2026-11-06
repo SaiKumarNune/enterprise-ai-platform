@@ -347,12 +347,18 @@ def test_action_agent_prepare_does_not_invent_personal_details() -> None:
             '{"reason":"personal reasons","start_date":"2026-11-03","days":3,"source_ids":["S1"]}'
         ]
     )
+    from app.services.authorization import Principal
+    from tests.auth_helpers import seed_user
+
+    session = FakeSession()
+    user = seed_user(session)
     draft = prepare_leave_draft(
         llm,
         request="Prepare an approval request for three days off.",
         excerpts=[{"source_id": "S1", "content": "Employees receive 15 vacation days."}],
         sources=[{"source_id": "S1", "document_id": "d", "chunk_id": "c", "page_number": 1}],
         action_type="leave_request",
+        principal=Principal.from_user(user),
     )
     assert draft is not None
     assert draft["days"] == 3

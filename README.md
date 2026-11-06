@@ -285,7 +285,7 @@ LangGraph is in-process orchestration only. PostgreSQL `agent_workflows` (includ
 
 `agent_trace` is a list of `{agent, outcome, summary, issues[]}`. It does not include prompts, chain-of-thought, or document excerpt text.
 
-Allowlisted tools: `knowledge_search`, `prepare_approval_request`, `execute_approved_action`. Only `POST /agents/{id}/approve` sets `authorized=True` after a row lock on `pending_approval`. Simulated execution writes `execution_result.simulated=true` and does not send email or change documents.
+Allowlisted tools: `knowledge_search`, `prepare_approval_request`, `execute_approved_action`. Research and Action invoke `knowledge_search` and `prepare_approval_request` through an in-process [Model Context Protocol](https://modelcontextprotocol.io) server (`mcp` Python SDK). The MCP server binds the authenticated JWT principal; tool arguments cannot set `user_id`, `tenant_id`, `role`, or `authorized`. `execute_approved_action` is **not** an MCP tool. Only `POST /agents/{id}/approve` sets `authorized=True` after a row lock on `pending_approval`. Simulated execution writes `execution_result.simulated=true` and does not send email or change documents.
 
 ```bash
 alembic upgrade head   # head c1d2e3f4a5b6 (chunk tsvector); prior b0c1d2e3f4a5
@@ -314,6 +314,14 @@ Example pending response (abridged): `status=pending_approval` only after the va
 
 `AGENT_MAX_STEPS` (default `8`) caps graph recursion. `/search` and `/rag/ask` contracts are unchanged.
 
+### MCP (local, in-process)
+
+The official Python SDK (`mcp==1.25.0` in `requirements.txt`) is installed with the rest of the backend. Research and Action agents open an in-memory MCP session per tool call; there is no extra Docker service, port, or API route. Identity is the JWT principal already attached to the workflow. To exercise tools without HTTP:
+
+```bash
+python3 -m pytest backend/tests/test_mcp.py backend/tests/test_multi_agent.py backend/tests/test_agents.py
+```
+
 ### Local verification (Swagger)
 
 1. Informational threshold: `POST /agents/run` with `When do vacation requests require manager approval?` and the vacation policy `document_id`. Expect `completed` and wording `3 or more consecutive days`, not `exceeding 3 days`.
@@ -335,6 +343,8 @@ python3 -m pytest
 ```
 
 Default tests use a fake embedder, an in-memory session, and temporary directories. They do not use development PostgreSQL (`enterprise_ai`) and they do not download the MiniLM model. Agent tests authenticate with JWT secrets set only in the pytest process.
+
+MCP tests (`backend/tests/test_mcp.py`) use the official SDK in-memory transport. They do not start a network MCP server. Research/Action agent tests exercise the same in-process client used at runtime.
 
 Isolated PostgreSQL tests require a **separate** database whose name ends in `_test` (recommended: `enterprise_ai_acl_test`). They refuse `enterprise_ai`. Create it once (this does not drop or truncate development data):
 

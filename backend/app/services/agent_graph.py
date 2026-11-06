@@ -172,6 +172,7 @@ def compile_agent_graph(
             excerpts=state.get("excerpts") or [],
             sources=state.get("sources") or [],
             action_type=state.get("action_type"),
+            principal=principal,
         )
         if draft is None:
             update = _clarification()
